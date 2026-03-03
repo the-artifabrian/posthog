@@ -1631,6 +1631,7 @@ class TestEndpointExecution(ClickhouseTestMixin, APIBaseTest):
             format="json",
         )
         self.assertEqual(run_response.status_code, status.HTTP_200_OK)
+
     # =========================================================================
     # BREAKDOWN SENTINEL CLEANUP
     # =========================================================================

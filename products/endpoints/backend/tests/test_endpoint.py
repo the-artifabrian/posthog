@@ -1273,15 +1273,15 @@ class TestMaterializationPreview(ClickhouseTestMixin, APIBaseTest):
         assert version.bucket_overrides == {"timestamp": "week"}
 
         # Change bucket_overrides — should trigger an immediate refresh
-        with mock.patch(
-            "products.data_warehouse.backend.data_load.saved_query_service.trigger_saved_query_schedule"
-        ) as mock_trigger:
+        with mock.patch("products.endpoints.backend.api.trigger_saved_query_schedule") as mock_trigger:
             response = self.client.patch(
                 f"/api/environments/{self.team.id}/endpoints/trigger-bucket/",
                 {"bucket_overrides": {"timestamp": "hour"}},
                 format="json",
             )
             assert response.status_code == status.HTTP_200_OK, response.json()
+            version = EndpointVersion.objects.get(endpoint__name="trigger-bucket", endpoint__team=self.team, version=1)
+            assert version.bucket_overrides == {"timestamp": "hour"}
             mock_trigger.assert_called_once()
 
     def test_bucket_overrides_unchanged_does_not_trigger_refresh(self):
