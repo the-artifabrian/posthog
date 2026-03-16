@@ -8,8 +8,7 @@ import { HealthCheckResult, HealthCheckResultError, PluginServerService, Plugins
 import { logger } from '../utils/logger'
 import { PromiseScheduler } from '../utils/promise-scheduler'
 import { TeamManager } from '../utils/team-manager'
-import { BatchWritingPersonsStore } from '../worker/ingestion/persons/batch-writing-person-store'
-import { PersonsStore } from '../worker/ingestion/persons/persons-store'
+import { ReadonlyPersonsStore } from '../worker/ingestion/persons/readonly-persons-store'
 import { PersonRepository } from '../worker/ingestion/persons/repositories/person-repository'
 import {
     TestingJoinedIngestionPipelineConfig,
@@ -52,7 +51,7 @@ export class IngestionTestingConsumer {
     protected kafkaConsumer: KafkaConsumer
     isStopping = false
     protected kafkaProducer?: KafkaProducerWrapper
-    private personsStore: PersonsStore
+    private personsStore: ReadonlyPersonsStore
     public readonly promiseScheduler = new PromiseScheduler()
 
     private joinedPipeline!: BatchPipeline<
@@ -85,7 +84,7 @@ export class IngestionTestingConsumer {
 
         // Single WarpStream producer used for all output (events, DLQ, internal messages)
         this.kafkaProducer = this.deps.kafkaProducer
-        this.personsStore = new BatchWritingPersonsStore(this.deps.personRepository, this.kafkaProducer)
+        this.personsStore = new ReadonlyPersonsStore(this.deps.personRepository)
     }
 
     public get service(): PluginServerService {
