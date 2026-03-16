@@ -220,6 +220,10 @@ func main() {
 
 	e.GET("/events", handlers.StreamEventsHandler(e.Logger, subChan, unSubChan))
 
+	if statsRedis != nil {
+		e.GET("/notifications", handlers.NotificationsHandler(statsRedis.Client()))
+	}
+
 	if config.Debug {
 		e.GET("/served", handlers.ServedHandler(stats))
 
