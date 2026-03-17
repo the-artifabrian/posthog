@@ -11,16 +11,31 @@ import posthoganalytics
 import temporalio.common
 import temporalio.activity
 import temporalio.workflow
+from slack_sdk.errors import SlackApiError
 from structlog import get_logger
 from temporalio.exceptions import ApplicationError
 
+from posthog.exceptions_capture import capture_exception
 from posthog.models.exported_asset import ExportedAsset
 from posthog.models.subscription import Subscription
 from posthog.sync import database_sync_to_async
 from posthog.temporal.common.base import PostHogWorkflow
 from posthog.temporal.common.heartbeat import Heartbeater
 
-from ee.tasks.subscriptions import deliver_subscription_report_async
+from ee.tasks.subscriptions import (
+    SLACK_USER_CONFIG_ERRORS,
+    SUPPORTED_TARGET_TYPES,
+    _capture_delivery_failed_event,
+    deliver_subscription_report_async,
+    get_subscription_failure_metric,
+    get_subscription_queued_metric,
+    get_subscription_success_metric,
+)
+from ee.tasks.subscriptions.email_subscriptions import send_email_subscription_report
+from ee.tasks.subscriptions.slack_subscriptions import (
+    get_slack_integration_for_team,
+    send_slack_message_with_integration_async,
+)
 from ee.tasks.subscriptions.subscription_utils import DEFAULT_MAX_ASSET_COUNT
 
 LOGGER = get_logger(__name__)
@@ -159,6 +174,140 @@ async def prepare_subscription_assets(inputs: PrepareSubscriptionAssetsInputs) -
         target_value=subscription.target_value,
         team_id=team.id,
     )
+
+
+@dataclasses.dataclass
+class DeliverSubscriptionInputs:
+    subscription_id: int
+    exported_asset_ids: list[int]
+    total_insight_count: int
+    is_new_subscription_target: bool = False
+    previous_value: typing.Optional[str] = None
+    invite_message: typing.Optional[str] = None
+
+
+@temporalio.activity.defn
+async def deliver_subscription(inputs: DeliverSubscriptionInputs) -> None:
+    """Deliver a subscription report using pre-exported assets.
+
+    Re-raises transient delivery errors so Temporal can retry.
+    Swallows user-configuration errors (Slack not_in_channel, etc.) since retrying won't help.
+    """
+    subscription = await database_sync_to_async(
+        Subscription.objects.select_related("created_by", "insight", "dashboard", "team", "integration").get,
+        thread_sensitive=False,
+    )(pk=inputs.subscription_id)
+
+    if subscription.target_type not in SUPPORTED_TARGET_TYPES:
+        LOGGER.warning(
+            "deliver_subscription.unsupported_target",
+            subscription_id=inputs.subscription_id,
+            target_type=subscription.target_type,
+        )
+        return
+
+    assets = await database_sync_to_async(
+        lambda: list(
+            ExportedAsset.objects_including_ttl_deleted.select_related("insight").filter(
+                pk__in=inputs.exported_asset_ids
+            )
+        ),
+        thread_sensitive=False,
+    )()
+
+    if not assets:
+        LOGGER.warning("deliver_subscription.no_assets", subscription_id=inputs.subscription_id)
+        return
+
+    if subscription.target_type == "email":
+        get_subscription_queued_metric("email", "temporal").add(1)
+
+        emails = subscription.target_value.split(",")
+        if inputs.is_new_subscription_target:
+            previous_emails = inputs.previous_value.split(",") if inputs.previous_value else []
+            emails = list(set(emails) - set(previous_emails))
+
+        for email in emails:
+            try:
+                await database_sync_to_async(send_email_subscription_report, thread_sensitive=False)(
+                    email,
+                    subscription,
+                    assets,
+                    invite_message=inputs.invite_message or "" if inputs.is_new_subscription_target else None,
+                    total_asset_count=inputs.total_insight_count,
+                    send_async=False,
+                )
+                get_subscription_success_metric("email", "temporal").add(1)
+            except Exception as e:
+                get_subscription_failure_metric("email", "temporal").add(1)
+                _capture_delivery_failed_event(subscription, e)
+                LOGGER.error(
+                    "deliver_subscription.email_failed",
+                    subscription_id=subscription.id,
+                    email=email,
+                    exc_info=True,
+                )
+                capture_exception(e)
+                raise  # Let Temporal retry transient email errors
+
+    elif subscription.target_type == "slack":
+        get_subscription_queued_metric("slack", "temporal").add(1)
+
+        try:
+            integration = subscription.integration
+            if integration is None or (integration and integration.kind != "slack"):
+                integration = await database_sync_to_async(get_slack_integration_for_team, thread_sensitive=False)(
+                    subscription.team_id
+                )
+
+            if not integration:
+                LOGGER.warning(
+                    "deliver_subscription.no_slack_integration",
+                    subscription_id=inputs.subscription_id,
+                )
+                return
+
+            delivery_result = await send_slack_message_with_integration_async(
+                integration,
+                subscription,
+                assets,
+                total_asset_count=inputs.total_insight_count,
+                is_new_subscription=inputs.is_new_subscription_target,
+            )
+
+            if delivery_result.is_complete_success:
+                get_subscription_success_metric("slack", "temporal").add(1)
+            elif delivery_result.is_partial_failure:
+                get_subscription_failure_metric("slack", "temporal", failure_type="partial").add(1)
+
+        except SlackApiError as e:
+            is_user_config_error = e.response.get("error") in SLACK_USER_CONFIG_ERRORS
+            if not is_user_config_error:
+                get_subscription_failure_metric("slack", "temporal", failure_type="complete").add(1)
+            _capture_delivery_failed_event(subscription, e)
+            LOGGER.error(
+                "deliver_subscription.slack_failed",
+                subscription_id=subscription.id,
+                exc_info=True,
+            )
+            capture_exception(e)
+            if not is_user_config_error:
+                raise  # Transient Slack errors — let Temporal retry
+        except Exception as e:
+            get_subscription_failure_metric("slack", "temporal", failure_type="complete").add(1)
+            _capture_delivery_failed_event(subscription, e)
+            LOGGER.error(
+                "deliver_subscription.slack_failed",
+                subscription_id=subscription.id,
+                exc_info=True,
+            )
+            capture_exception(e)
+            raise  # Unknown errors — let Temporal retry
+
+    # Update next delivery date (unless this is a new-subscription-target delivery)
+    if not inputs.is_new_subscription_target:
+        subscription.set_next_delivery_date(subscription.next_delivery_date)
+        await database_sync_to_async(subscription.save, thread_sensitive=False)(update_fields=["next_delivery_date"])
 
 
 @dataclasses.dataclass

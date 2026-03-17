@@ -367,3 +367,45 @@ async def test_prepare_subscription_assets_dashboard_with_multiple_insights(
 
     assert len(result.exported_asset_ids) == 3
     assert mock_analytics.capture.call_count == 3
+
+
+@patch("ee.tasks.subscriptions.get_metric_meter")
+@patch("posthog.temporal.subscriptions.subscription_scheduling_workflow.send_email_subscription_report")
+@freeze_time("2022-02-02T08:55:00.000Z")
+@pytest.mark.asyncio
+async def test_deliver_subscription_sends_email(
+    mock_send_email: MagicMock,
+    mock_metric_meter: MagicMock,
+    temporal_client: Client,
+    team,
+    user,
+):
+    """deliver_subscription should send emails for all recipients."""
+    from posthog.temporal.subscriptions.subscription_scheduling_workflow import (
+        DeliverSubscriptionInputs,
+        deliver_subscription,
+    )
+
+    insight = await sync_to_async(Insight.objects.create)(team=team, short_id="del01", name="Deliver Test")
+    asset = await sync_to_async(ExportedAsset.objects.create)(
+        team=team,
+        insight=insight,
+        export_format="image/png",
+        content_location="s3://bucket/test.png",
+    )
+    # Factory default target_value is "test1@posthog.com,test2@posthog.com" (2 recipients)
+    subscription = await sync_to_async(create_subscription)(team=team, insight=insight, created_by=user)
+
+    from temporalio.testing import ActivityEnvironment
+
+    env = ActivityEnvironment()
+    await env.run(
+        deliver_subscription,
+        DeliverSubscriptionInputs(
+            subscription_id=subscription.id,
+            exported_asset_ids=[asset.id],
+            total_insight_count=1,
+        ),
+    )
+
+    assert mock_send_email.call_count == 2  # "test1@posthog.com" and "test2@posthog.com"
