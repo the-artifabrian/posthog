@@ -56,8 +56,19 @@ class ExportedAssetSerializer(serializers.ModelSerializer):
             "filename",
             "expires_after",
             "exception",
+            "is_stale",
+            "data_last_refresh",
         ]
-        read_only_fields = ["id", "created_at", "has_content", "filename", "expires_after", "exception"]
+        read_only_fields = [
+            "id",
+            "created_at",
+            "has_content",
+            "filename",
+            "expires_after",
+            "exception",
+            "is_stale",
+            "data_last_refresh",
+        ]
 
     def to_representation(self, instance):
         """Override to show stuck exports as having an exception."""
