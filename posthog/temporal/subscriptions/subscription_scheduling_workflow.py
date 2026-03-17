@@ -15,12 +15,21 @@ from slack_sdk.errors import SlackApiError
 from structlog import get_logger
 from temporalio.exceptions import ApplicationError
 
+from posthog.event_usage import EventSource
 from posthog.exceptions_capture import capture_exception
 from posthog.models.exported_asset import ExportedAsset
 from posthog.models.subscription import Subscription
 from posthog.sync import database_sync_to_async
 from posthog.temporal.common.base import PostHogWorkflow
 from posthog.temporal.common.heartbeat import Heartbeater
+from posthog.temporal.exports.activities import emit_export_outcome_events, export_asset_activity
+from posthog.temporal.exports.retry_policy import EXPORT_RETRY_POLICY
+from posthog.temporal.exports.types import (
+    EmitExportOutcomeInput,
+    ExportAssetActivityInputs,
+    ExportAssetResult,
+    ExportOutcomeAsset,
+)
 
 from ee.tasks.subscriptions import (
     SLACK_USER_CONFIG_ERRORS,
@@ -308,6 +317,122 @@ async def deliver_subscription(inputs: DeliverSubscriptionInputs) -> None:
     if not inputs.is_new_subscription_target:
         subscription.set_next_delivery_date(subscription.next_delivery_date)
         await database_sync_to_async(subscription.save, thread_sensitive=False)(update_fields=["next_delivery_date"])
+
+
+@dataclasses.dataclass
+class DeliverSubscriptionWorkflowInputs:
+    subscription_id: int
+    previous_value: typing.Optional[str] = None
+    invite_message: typing.Optional[str] = None
+
+
+@temporalio.workflow.defn(name="deliver-subscription")
+class DeliverSubscriptionWorkflow(PostHogWorkflow):
+    """Child workflow that handles a single subscription: prepare -> export -> deliver -> emit."""
+
+    @staticmethod
+    def parse_inputs(inputs: list[str]) -> DeliverSubscriptionWorkflowInputs:
+        loaded = json.loads(inputs[0])
+        return DeliverSubscriptionWorkflowInputs(**loaded)
+
+    @temporalio.workflow.run
+    async def run(self, inputs: DeliverSubscriptionWorkflowInputs) -> None:
+        # Phase 1: Prepare — create ExportedAssets, emit slo_export_started
+        prepare_result = await temporalio.workflow.execute_activity(
+            prepare_subscription_assets,
+            PrepareSubscriptionAssetsInputs(subscription_id=inputs.subscription_id),
+            start_to_close_timeout=dt.timedelta(minutes=5),
+            retry_policy=temporalio.common.RetryPolicy(
+                initial_interval=dt.timedelta(seconds=10),
+                maximum_interval=dt.timedelta(minutes=2),
+                maximum_attempts=3,
+            ),
+        )
+
+        if not prepare_result.exported_asset_ids:
+            return
+
+        # Early exit if this is a target-change delivery but the value hasn't changed.
+        if inputs.previous_value is not None and prepare_result.target_value == inputs.previous_value:
+            return
+
+        # Phase 2: Fan-out export — one activity per insight, independent retry
+        export_tasks = []
+        for asset_id in prepare_result.exported_asset_ids:
+            task = temporalio.workflow.execute_activity(
+                export_asset_activity,
+                ExportAssetActivityInputs(
+                    exported_asset_id=asset_id,
+                    source=EventSource.SUBSCRIPTION,
+                ),
+                start_to_close_timeout=dt.timedelta(hours=1),
+                heartbeat_timeout=dt.timedelta(minutes=2),
+                retry_policy=EXPORT_RETRY_POLICY,
+            )
+            export_tasks.append((asset_id, task))
+
+        # Gather results — continue on failure (partial success OK)
+        export_results: list[ExportAssetResult | BaseException] = await asyncio.gather(
+            *[task for _, task in export_tasks],
+            return_exceptions=True,
+        )
+
+        # Build outcome data for SLO events
+        outcome_assets = []
+        successful_asset_ids = []
+        for (asset_id, _), result in zip(export_tasks, export_results):
+            if isinstance(result, BaseException):
+                outcome_assets.append(ExportOutcomeAsset(exported_asset_id=asset_id, success=False))
+            else:
+                outcome_assets.append(
+                    ExportOutcomeAsset(
+                        exported_asset_id=result.exported_asset_id,
+                        success=result.success,
+                        failure_type=result.failure_type,
+                    )
+                )
+                if result.success:
+                    successful_asset_ids.append(result.exported_asset_id)
+
+        # Phase 3: Deliver — send with whatever assets we have.
+        delivery_asset_ids = successful_asset_ids if successful_asset_ids else prepare_result.exported_asset_ids
+
+        is_new = inputs.previous_value is not None
+
+        await temporalio.workflow.execute_activity(
+            deliver_subscription,
+            DeliverSubscriptionInputs(
+                subscription_id=inputs.subscription_id,
+                exported_asset_ids=delivery_asset_ids,
+                total_insight_count=prepare_result.total_insight_count,
+                is_new_subscription_target=is_new,
+                previous_value=inputs.previous_value,
+                invite_message=inputs.invite_message,
+            ),
+            start_to_close_timeout=dt.timedelta(minutes=5),
+            retry_policy=temporalio.common.RetryPolicy(
+                initial_interval=dt.timedelta(seconds=10),
+                maximum_interval=dt.timedelta(minutes=2),
+                maximum_attempts=3,
+            ),
+        )
+
+        # Phase 4: Emit SLO outcome events (workflow-level, guaranteed delivery)
+        await temporalio.workflow.execute_activity(
+            emit_export_outcome_events,
+            EmitExportOutcomeInput(
+                team_id=prepare_result.team_id,
+                source="subscription",
+                export_format="image/png",
+                assets=outcome_assets,
+            ),
+            start_to_close_timeout=dt.timedelta(minutes=2),
+            retry_policy=temporalio.common.RetryPolicy(
+                initial_interval=dt.timedelta(seconds=5),
+                maximum_interval=dt.timedelta(minutes=1),
+                maximum_attempts=3,
+            ),
+        )
 
 
 @dataclasses.dataclass
