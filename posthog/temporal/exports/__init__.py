@@ -6,10 +6,12 @@ from posthog.temporal.exports.types import (
     ExportAssetResult,
     ExportOutcome,
 )
+from posthog.temporal.exports.workflows import ExportAssetWorkflow
 
 __all__ = [
     "emit_export_outcome_events",
     "export_asset_activity",
+    "ExportAssetWorkflow",
     "EXPORT_RETRY_POLICY",
     "EmitExportOutcomeInput",
     "ExportAssetActivityInputs",
@@ -17,6 +19,6 @@ __all__ = [
     "ExportOutcome",
 ]
 
-WORKFLOWS: list = []
+WORKFLOWS = [ExportAssetWorkflow]
 
 ACTIVITIES = [export_asset_activity, emit_export_outcome_events]
