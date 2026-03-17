@@ -3,6 +3,7 @@ import typing
 import asyncio
 import datetime as dt
 import dataclasses
+from uuid import NAMESPACE_DNS, uuid5
 
 from django.conf import settings
 
@@ -13,12 +14,14 @@ import temporalio.workflow
 from structlog import get_logger
 from temporalio.exceptions import ApplicationError
 
+from posthog.models.exported_asset import ExportedAsset
 from posthog.models.subscription import Subscription
 from posthog.sync import database_sync_to_async
 from posthog.temporal.common.base import PostHogWorkflow
 from posthog.temporal.common.heartbeat import Heartbeater
 
 from ee.tasks.subscriptions import deliver_subscription_report_async
+from ee.tasks.subscriptions.subscription_utils import DEFAULT_MAX_ASSET_COUNT
 
 LOGGER = get_logger(__name__)
 
@@ -61,6 +64,101 @@ async def fetch_due_subscriptions_activity(inputs: FetchDueSubscriptionsActivity
     await logger.ainfo(f"Database query completed, found {len(subscription_ids)} subscriptions")
 
     return subscription_ids
+
+
+@dataclasses.dataclass
+class PrepareSubscriptionAssetsInputs:
+    subscription_id: int
+    max_asset_count: int = DEFAULT_MAX_ASSET_COUNT
+
+
+@dataclasses.dataclass
+class PrepareSubscriptionAssetsResult:
+    subscription_id: int
+    exported_asset_ids: list[int]
+    total_insight_count: int
+    target_type: str
+    target_value: str
+    team_id: int = 0
+    is_new_subscription_target: bool = False
+    previous_value: typing.Optional[str] = None
+    invite_message: typing.Optional[str] = None
+
+
+@temporalio.activity.defn
+async def prepare_subscription_assets(inputs: PrepareSubscriptionAssetsInputs) -> PrepareSubscriptionAssetsResult:
+    """Load subscription, determine insights, bulk-create ExportedAssets, emit slo_export_started."""
+    subscription = await database_sync_to_async(
+        Subscription.objects.select_related("created_by", "insight", "dashboard", "team").get,
+        thread_sensitive=False,
+    )(pk=inputs.subscription_id)
+
+    team = subscription.team
+
+    if subscription.dashboard:
+        tiles = await database_sync_to_async(
+            lambda: list(
+                subscription.dashboard.tiles.select_related("insight")
+                .filter(insight__isnull=False, insight__deleted=False)
+                .all()
+            ),
+            thread_sensitive=False,
+        )()
+        tiles.sort(
+            key=lambda x: (
+                (x.layouts or {}).get("sm", {}).get("y", 100),
+                (x.layouts or {}).get("sm", {}).get("x", 100),
+            )
+        )
+        insights = [tile.insight for tile in tiles if tile.insight]
+
+        selected_ids = await database_sync_to_async(
+            lambda: set(subscription.dashboard_export_insights.values_list("id", flat=True))
+            if subscription.dashboard_export_insights.exists()
+            else None,
+            thread_sensitive=False,
+        )()
+        if selected_ids:
+            insights = [i for i in insights if i.id in selected_ids]
+    elif subscription.insight:
+        insights = [subscription.insight]
+    else:
+        raise Exception("There are no insights to be sent for this Subscription")
+
+    expiry = ExportedAsset.compute_expires_after(ExportedAsset.ExportFormat.PNG)
+    assets = [
+        ExportedAsset(
+            team=team,
+            export_format=ExportedAsset.ExportFormat.PNG,
+            insight=insight,
+            dashboard=subscription.dashboard,
+            expires_after=expiry,
+        )
+        for insight in insights[: inputs.max_asset_count]
+    ]
+    await database_sync_to_async(ExportedAsset.objects.bulk_create, thread_sensitive=False)(assets)
+
+    for asset in assets:
+        posthoganalytics.capture(
+            distinct_id=str(team.id),
+            event="slo_export_started",
+            uuid=str(uuid5(NAMESPACE_DNS, f"slo-export-started-{asset.id}")),
+            properties={
+                "exported_asset_id": asset.id,
+                "team_id": team.id,
+                "source": "subscription",
+                "format": asset.export_format,
+            },
+        )
+
+    return PrepareSubscriptionAssetsResult(
+        subscription_id=subscription.id,
+        exported_asset_ids=[a.id for a in assets],
+        total_insight_count=len(insights),
+        target_type=subscription.target_type,
+        target_value=subscription.target_value,
+        team_id=team.id,
+    )
 
 
 @dataclasses.dataclass
