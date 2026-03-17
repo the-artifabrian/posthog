@@ -140,6 +140,20 @@ def _prepare_slack_message(
             }
         )
 
+    # Add stale data warning if any asset used cached data
+    stale_assets = [a for a in assets if a.is_stale]
+    if stale_assets:
+        oldest_refresh = min(
+            (a.data_last_refresh for a in stale_assets if a.data_last_refresh),
+            default=None,
+        )
+        if oldest_refresh:
+            date_str = oldest_refresh.strftime("%B %d, %Y at %H:%M UTC")
+            stale_text = f"\u26a0\ufe0f Some data in this report is from {date_str} due to a temporary issue."
+        else:
+            stale_text = "\u26a0\ufe0f Some data in this report may not be current due to a temporary issue."
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": stale_text}})
+
     blocks.extend(
         [
             {"type": "divider"},
