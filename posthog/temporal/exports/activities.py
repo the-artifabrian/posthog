@@ -1,9 +1,11 @@
+import os
 from uuid import NAMESPACE_DNS, uuid5
 
 import structlog
 import posthoganalytics
 import temporalio.activity
 
+from posthog.event_usage import EventSource
 from posthog.models.exported_asset import ExportedAsset
 from posthog.sync import database_sync_to_async
 from posthog.tasks import exporter
@@ -41,7 +43,7 @@ async def export_asset_activity(inputs: ExportAssetActivityInputs) -> ExportAsse
                 asset,
                 limit=inputs.limit,
                 max_height_pixels=inputs.max_height_pixels,
-                source=inputs.source,
+                source=EventSource(inputs.source) if inputs.source else None,
             )
         except Exception:
             await database_sync_to_async(asset.refresh_from_db, thread_sensitive=False)()
@@ -59,26 +61,35 @@ async def export_asset_activity(inputs: ExportAssetActivityInputs) -> ExportAsse
             exported_asset_id=asset.id,
             success=asset.has_content,
             failure_type=asset.failure_type,
+            insight_id=asset.insight_id,
         )
 
 
 @temporalio.activity.defn
 async def emit_export_outcome_events(inputs: EmitExportOutcomeInput) -> None:
-    """Emit slo_export_completed events for each asset. Workflow-level activity for guaranteed delivery."""
+    """Emit slo_operation_completed events for each export asset. Workflow-level activity for guaranteed delivery."""
     for asset_data in inputs.assets:
         outcome = ExportOutcome.SUCCESS if asset_data.success else _classify_outcome(asset_data.failure_type)
+        result_quality = "ok" if asset_data.success else "error"
         posthoganalytics.capture(
             distinct_id=str(inputs.team_id),
-            event="slo_export_completed",
-            uuid=str(uuid5(NAMESPACE_DNS, f"slo-export-completed-{asset_data.exported_asset_id}")),
+            event="slo_operation_completed",
+            uuid=str(uuid5(NAMESPACE_DNS, f"slo-operation-completed-{asset_data.exported_asset_id}")),
             properties={
-                "exported_asset_id": asset_data.exported_asset_id,
+                # Canonical SLO properties
+                "operation": "export",
+                "operation_type": inputs.export_format,
+                "operation_id": str(asset_data.exported_asset_id),
+                "resource_id": str(asset_data.insight_id) if asset_data.insight_id else None,
                 "team_id": inputs.team_id,
-                "source": inputs.source,
-                "format": inputs.export_format,
                 "outcome": outcome,
+                "result_quality": result_quality,
+                "duration_ms": asset_data.duration_ms,
+                "deploy_sha": os.environ.get("COMMIT_SHA"),
+                # Export-specific properties
+                "exported_asset_id": asset_data.exported_asset_id,
+                "source": inputs.source,
                 "total_attempts": asset_data.attempts,
-                "total_duration_ms": asset_data.duration_ms,
                 "failure_type": asset_data.failure_type,
             },
         )
@@ -86,6 +97,7 @@ async def emit_export_outcome_events(inputs: EmitExportOutcomeInput) -> None:
             "emit_export_outcome_events.emitted",
             exported_asset_id=asset_data.exported_asset_id,
             outcome=outcome,
+            result_quality=result_quality,
         )
 
 

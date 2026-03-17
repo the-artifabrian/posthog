@@ -23,6 +23,7 @@ class ExportAssetResult:
     exported_asset_id: int
     success: bool
     failure_type: Optional[str] = None
+    insight_id: Optional[int] = None
 
 
 @dataclasses.dataclass
@@ -34,6 +35,7 @@ class ExportOutcomeAsset:
     failure_type: Optional[str] = None
     duration_ms: Optional[float] = None
     attempts: int = 1
+    insight_id: Optional[int] = None
 
 
 @dataclasses.dataclass

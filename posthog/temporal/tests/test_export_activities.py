@@ -121,8 +121,10 @@ async def test_export_asset_activity_propagates_user_errors(
                 )
 
         # WorkflowFailureError.cause is ActivityError; ActivityError.cause is the ApplicationError
-        activity_error = exc_info.value.cause
+        wf_error = exc_info.value
+        assert isinstance(wf_error, WorkflowFailureError)
+        activity_error = wf_error.cause
         assert activity_error is not None
-        app_error = activity_error.cause
+        app_error = activity_error.cause  # type: ignore[union-attr]
         assert app_error is not None
         assert "ExcelColumnLimitExceeded" in str(app_error) or "18,278 columns" in str(app_error)

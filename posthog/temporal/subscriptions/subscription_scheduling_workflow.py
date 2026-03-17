@@ -1,3 +1,4 @@
+import os
 import json
 import typing
 import asyncio
@@ -89,6 +90,7 @@ async def fetch_due_subscriptions_activity(inputs: FetchDueSubscriptionsActivity
 class PrepareSubscriptionAssetsInputs:
     subscription_id: int
     max_asset_count: int = DEFAULT_MAX_ASSET_COUNT
+    previous_value: typing.Optional[str] = None
 
 
 @dataclasses.dataclass
@@ -106,20 +108,31 @@ class PrepareSubscriptionAssetsResult:
 
 @temporalio.activity.defn
 async def prepare_subscription_assets(inputs: PrepareSubscriptionAssetsInputs) -> PrepareSubscriptionAssetsResult:
-    """Load subscription, determine insights, bulk-create ExportedAssets, emit slo_export_started."""
+    """Load subscription, determine insights, bulk-create ExportedAssets, emit slo_operation_started."""
     subscription = await database_sync_to_async(
         Subscription.objects.select_related("created_by", "insight", "dashboard", "team").get,
         thread_sensitive=False,
     )(pk=inputs.subscription_id)
 
     team = subscription.team
+    dashboard = subscription.dashboard
 
-    if subscription.dashboard:
+    # Early exit if target value hasn't changed — avoids creating orphaned assets
+    # and emitting unpaired slo_operation_started events
+    if inputs.previous_value is not None and subscription.target_value == inputs.previous_value:
+        return PrepareSubscriptionAssetsResult(
+            subscription_id=subscription.id,
+            exported_asset_ids=[],
+            total_insight_count=0,
+            target_type=subscription.target_type,
+            target_value=subscription.target_value,
+            team_id=team.id,
+        )
+
+    if dashboard:
         tiles = await database_sync_to_async(
             lambda: list(
-                subscription.dashboard.tiles.select_related("insight")
-                .filter(insight__isnull=False, insight__deleted=False)
-                .all()
+                dashboard.tiles.select_related("insight").filter(insight__isnull=False, insight__deleted=False).all()
             ),
             thread_sensitive=False,
         )()
@@ -150,7 +163,7 @@ async def prepare_subscription_assets(inputs: PrepareSubscriptionAssetsInputs) -
             team=team,
             export_format=ExportedAsset.ExportFormat.PNG,
             insight=insight,
-            dashboard=subscription.dashboard,
+            dashboard=dashboard,
             expires_after=expiry,
         )
         for insight in insights[: inputs.max_asset_count]
@@ -160,13 +173,19 @@ async def prepare_subscription_assets(inputs: PrepareSubscriptionAssetsInputs) -
     for asset in assets:
         posthoganalytics.capture(
             distinct_id=str(team.id),
-            event="slo_export_started",
-            uuid=str(uuid5(NAMESPACE_DNS, f"slo-export-started-{asset.id}")),
+            event="slo_operation_started",
+            uuid=str(uuid5(NAMESPACE_DNS, f"slo-operation-started-{asset.id}")),
             properties={
-                "exported_asset_id": asset.id,
+                # Canonical SLO properties
+                "operation": "export",
+                "operation_type": asset.export_format,
+                "operation_id": str(asset.id),
+                "resource_id": str(asset.insight_id) if asset.insight_id else None,
                 "team_id": team.id,
+                "deploy_sha": os.environ.get("COMMIT_SHA"),
+                # Export-specific properties
+                "exported_asset_id": asset.id,
                 "source": "subscription",
-                "format": asset.export_format,
             },
         )
 
@@ -231,6 +250,8 @@ async def deliver_subscription(inputs: DeliverSubscriptionInputs) -> None:
             previous_emails = inputs.previous_value.split(",") if inputs.previous_value else []
             emails = list(set(emails) - set(previous_emails))
 
+        last_error: Exception | None = None
+        success_count = 0
         for email in emails:
             try:
                 await database_sync_to_async(send_email_subscription_report, thread_sensitive=False)(
@@ -242,6 +263,7 @@ async def deliver_subscription(inputs: DeliverSubscriptionInputs) -> None:
                     send_async=False,
                 )
                 get_subscription_success_metric("email", "temporal").add(1)
+                success_count += 1
             except Exception as e:
                 get_subscription_failure_metric("email", "temporal").add(1)
                 _capture_delivery_failed_event(subscription, e)
@@ -252,7 +274,12 @@ async def deliver_subscription(inputs: DeliverSubscriptionInputs) -> None:
                     exc_info=True,
                 )
                 capture_exception(e)
-                raise  # Let Temporal retry transient email errors
+                last_error = e
+
+        # Only retry if ALL recipients failed — partial success is acceptable
+        # to avoid duplicate sends to already-delivered recipients
+        if last_error is not None and success_count == 0:
+            raise last_error
 
     elif subscription.target_type == "slack":
         get_subscription_queued_metric("slack", "temporal").add(1)
@@ -332,10 +359,15 @@ class DeliverSubscriptionWorkflow(PostHogWorkflow):
 
     @temporalio.workflow.run
     async def run(self, inputs: DeliverSubscriptionWorkflowInputs) -> None:
-        # Phase 1: Prepare — create ExportedAssets, emit slo_export_started
+        # Phase 1: Prepare — create ExportedAssets, emit slo_operation_started
+        # previous_value is passed so the activity can skip asset creation if the
+        # target value hasn't changed (avoids orphaned assets and unpaired SLO events)
         prepare_result = await temporalio.workflow.execute_activity(
             prepare_subscription_assets,
-            PrepareSubscriptionAssetsInputs(subscription_id=inputs.subscription_id),
+            PrepareSubscriptionAssetsInputs(
+                subscription_id=inputs.subscription_id,
+                previous_value=inputs.previous_value,
+            ),
             start_to_close_timeout=dt.timedelta(minutes=5),
             retry_policy=temporalio.common.RetryPolicy(
                 initial_interval=dt.timedelta(seconds=10),
@@ -345,10 +377,6 @@ class DeliverSubscriptionWorkflow(PostHogWorkflow):
         )
 
         if not prepare_result.exported_asset_ids:
-            return
-
-        # Early exit if this is a target-change delivery but the value hasn't changed.
-        if inputs.previous_value is not None and prepare_result.target_value == inputs.previous_value:
             return
 
         # Phase 2: Fan-out export — one activity per insight, independent retry
@@ -384,6 +412,7 @@ class DeliverSubscriptionWorkflow(PostHogWorkflow):
                         exported_asset_id=result.exported_asset_id,
                         success=result.success,
                         failure_type=result.failure_type,
+                        insight_id=result.insight_id,
                     )
                 )
                 if result.success:
@@ -392,7 +421,9 @@ class DeliverSubscriptionWorkflow(PostHogWorkflow):
         # Phase 3: Deliver — send with whatever assets we have.
         delivery_asset_ids = successful_asset_ids if successful_asset_ids else prepare_result.exported_asset_ids
 
-        is_new = inputs.previous_value is not None
+        # API passes previous_value="" for new subscriptions and the actual
+        # old value for updates — treat both None and "" as "not a target change"
+        is_new = bool(inputs.previous_value)
 
         await temporalio.workflow.execute_activity(
             deliver_subscription,
@@ -473,13 +504,16 @@ class ScheduleAllSubscriptionsWorkflow(PostHogWorkflow):
             ),
         )
 
-        # Fan-out child workflows — one per subscription, fully isolated
+        # Fan-out child workflows — one per subscription, fully isolated.
+        # Include the parent workflow run ID in the child ID to avoid collisions
+        # when a previous schedule run's child is still executing.
+        run_id = temporalio.workflow.info().run_id
         tasks = []
         for sub_id in subscription_ids:
             task = temporalio.workflow.execute_child_workflow(
                 DeliverSubscriptionWorkflow.run,
                 DeliverSubscriptionWorkflowInputs(subscription_id=sub_id),
-                id=f"deliver-subscription-{sub_id}",
+                id=f"deliver-subscription-{sub_id}-{run_id}",
                 parent_close_policy=temporalio.workflow.ParentClosePolicy.ABANDON,
                 execution_timeout=dt.timedelta(hours=2),
             )
