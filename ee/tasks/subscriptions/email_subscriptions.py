@@ -73,6 +73,19 @@ def send_email_subscription_report(
             subject = f"{inviter_name} subscribed you to a PostHog {resource_info.kind}"
         campaign_key = f"{resource_info.kind.lower()}_subscription_new_{uuid.uuid4()}"
 
+    stale_assets = [a for a in assets if a.is_stale]
+    stale_data_note = None
+    if stale_assets:
+        oldest_refresh = min(
+            (a.data_last_refresh for a in stale_assets if a.data_last_refresh),
+            default=None,
+        )
+        if oldest_refresh:
+            date_str = oldest_refresh.strftime("%B %d, %Y at %H:%M UTC")
+            stale_data_note = f"Some data in this report is from {date_str} due to a temporary issue."
+        else:
+            stale_data_note = "Some data in this report may not be current due to a temporary issue."
+
     message = EmailMessage(
         campaign_key=campaign_key,
         subject=subject,
@@ -89,6 +102,7 @@ def send_email_subscription_report(
             "invite_message": invite_message,
             "invite_summary": invite_summary,
             "total_asset_count": total_asset_count,
+            "stale_data_note": stale_data_note,
         },
     )
     message.add_recipient(email=email)
