@@ -89,6 +89,8 @@ interface CookielessConfig {
     sessionTtlSeconds: number
     saltTtlSeconds: number
     sessionInactivityMs: number
+    /** When true, skip all Redis writes (salts, identifies, sessions) */
+    readonlyMode: boolean
 }
 
 export class CookielessManager {
@@ -110,7 +112,8 @@ export class CookielessManager {
             | 'COOKIELESS_SESSION_INACTIVITY_MS'
             | 'COOKIELESS_IDENTIFIES_TTL_SECONDS'
         >,
-        redis: GenericPool<Redis.Redis>
+        redis: GenericPool<Redis.Redis>,
+        readonlyMode?: boolean
     ) {
         this.config = {
             disabled: config.COOKIELESS_DISABLED,
@@ -120,6 +123,7 @@ export class CookielessManager {
             saltTtlSeconds: config.COOKIELESS_SALT_TTL_SECONDS,
             sessionInactivityMs: config.COOKIELESS_SESSION_INACTIVITY_MS,
             identifiesTtlSeconds: config.COOKIELESS_IDENTIFIES_TTL_SECONDS,
+            readonlyMode: readonlyMode ?? false,
         }
 
         this.redisHelpers = new RedisHelpers(redis)
@@ -163,6 +167,11 @@ export class CookielessManager {
                     return { success: true, salt }
                 }
                 cookielessCacheMissCounter.labels({ operation: 'getSaltForDay', day: yyyymmdd }).inc()
+
+                if (this.config.readonlyMode) {
+                    // In readonly mode, we never create salts — if it's not in Redis, we can't hash
+                    return { success: false, reason: 'date_out_of_range' }
+                }
 
                 // try to write a new one to redis, but don't overwrite
                 const newSalt = randomBytes(16)
@@ -646,32 +655,33 @@ export class CookielessManager {
             eventWithProcessing.event = stripPIIProperties(newEvent)
         }
 
-        // write identifies to redis
-        const dirtyIdentifies = Object.entries(identifiesCache)
-            .filter(([, value]) => value.isDirty)
-            .map(([key, value]): [string, string[]] => {
-                return [key, Array.from(value.identifyEventIds)]
-            })
-        if (dirtyIdentifies.length > 0) {
-            await this.redisHelpers.redisSAddMulti(
-                dirtyIdentifies,
-                'CookielessManagerBatch.identifiesCacheWrite',
-                this.config.identifiesTtlSeconds
-            )
-        }
+        // write identifies and sessions to redis (skipped in readonly mode)
+        if (!this.config.readonlyMode) {
+            const dirtyIdentifies = Object.entries(identifiesCache)
+                .filter(([, value]) => value.isDirty)
+                .map(([key, value]): [string, string[]] => {
+                    return [key, Array.from(value.identifyEventIds)]
+                })
+            if (dirtyIdentifies.length > 0) {
+                await this.redisHelpers.redisSAddMulti(
+                    dirtyIdentifies,
+                    'CookielessManagerBatch.identifiesCacheWrite',
+                    this.config.identifiesTtlSeconds
+                )
+            }
 
-        // write the session state to redis
-        const dirtySessions = Object.entries(sessionCache)
-            .filter(([, value]) => value.isDirty)
-            .map(([key, value]): [string, Buffer] => {
-                return [key, sessionStateToBuffer(value.session)]
-            })
-        if (dirtySessions.length > 0) {
-            await this.redisHelpers.redisSetBufferMulti(
-                dirtySessions,
-                'CookielessManagerBatch.sessionCacheWrite',
-                this.config.sessionTtlSeconds
-            )
+            const dirtySessions = Object.entries(sessionCache)
+                .filter(([, value]) => value.isDirty)
+                .map(([key, value]): [string, Buffer] => {
+                    return [key, sessionStateToBuffer(value.session)]
+                })
+            if (dirtySessions.length > 0) {
+                await this.redisHelpers.redisSetBufferMulti(
+                    dirtySessions,
+                    'CookielessManagerBatch.sessionCacheWrite',
+                    this.config.sessionTtlSeconds
+                )
+            }
         }
 
         // Update results with successfully processed events, but don't overwrite

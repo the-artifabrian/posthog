@@ -281,10 +281,16 @@ export class PluginServer {
                         'WARPSTREAM_PRODUCER'
                     )
 
+                    const readonlyCookielessManager = new CookielessManager(this.config, this.cookielessRedisPool!, {
+                        readonlyMode: true,
+                    })
+
                     const consumer = new IngestionTestingConsumer(this.config, {
                         kafkaProducer: kafkaWarpStreamProducer,
                         personRepository: ingestionCdpServices!.personRepository,
                         teamManager,
+                        cookielessManager: readonlyCookielessManager,
+                        redisPool: this.redisPool!,
                     })
                     await consumer.start()
                     return consumer.service

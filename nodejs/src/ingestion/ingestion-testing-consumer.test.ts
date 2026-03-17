@@ -9,6 +9,8 @@ import { createTeam, getFirstTeam, getTeam, resetTestDatabase } from '~/tests/he
 import { Hub, PipelineEvent, Team } from '../../src/types'
 import { closeHub, createHub } from '../../src/utils/db/hub'
 import { UUIDT } from '../utils/utils'
+import { COOKIELESS_MODE_FLAG_PROPERTY, COOKIELESS_SENTINEL_VALUE } from './cookieless/cookieless-manager'
+import { CookielessManager } from './cookieless/cookieless-manager'
 import { IngestionTestingConsumer } from './ingestion-testing-consumer'
 
 const DEFAULT_TEST_TIMEOUT = 5000
@@ -83,9 +85,14 @@ describe('IngestionTestingConsumer', () => {
         hub: Hub,
         overrides?: ConstructorParameters<typeof IngestionTestingConsumer>[2]
     ) => {
+        const readonlyCookielessManager = new CookielessManager(hub, hub.cookielessRedisPool, { readonlyMode: true })
         const ingester = new IngestionTestingConsumer(
             hub,
-            { ...hub, personRepository: hub.personRepository },
+            {
+                ...hub,
+                personRepository: hub.personRepository,
+                cookielessManager: readonlyCookielessManager,
+            },
             overrides
         )
         // NOTE: We don't actually use kafka so we skip instantiation for faster tests
@@ -380,6 +387,74 @@ describe('IngestionTestingConsumer', () => {
                 (m) => m.topic === 'clickhouse_person_test' || m.topic === 'clickhouse_person_distinct_id2_test'
             )
             expect(personMessages).toHaveLength(0)
+        })
+    })
+
+    describe('cookieless processing', () => {
+        it('should process cookieless events with readonly cookieless (no Redis writes for identifies/sessions)', async () => {
+            const events = [
+                createEvent({
+                    distinct_id: COOKIELESS_SENTINEL_VALUE,
+                    properties: {
+                        $current_url: 'http://localhost:8000',
+                        [COOKIELESS_MODE_FLAG_PROPERTY]: 'stateless',
+                        $raw_user_agent: 'Mozilla/5.0 (Macintosh)',
+                        $ip: '192.168.1.1',
+                        $host: 'example.com',
+                    },
+                }),
+            ]
+            await ingester.handleKafkaBatch(createKafkaMessages(events))
+
+            const eventMessages = mockProducerObserver.getProducedKafkaMessagesForTopic('clickhouse_events_json_test')
+            expect(eventMessages).toHaveLength(1)
+
+            // The distinct_id should have been rewritten from the sentinel value
+            expect(eventMessages[0].value.distinct_id).not.toBe(COOKIELESS_SENTINEL_VALUE)
+            expect(eventMessages[0].value.distinct_id).toMatch(/^cookieless_/)
+        })
+
+        it('should drop cookieless events when team has cookieless disabled', async () => {
+            // team2 has default cookieless_server_hash_mode which may be null/disabled
+            // Create an event with cookieless flag for team2
+            const events = [
+                createEvent({
+                    distinct_id: COOKIELESS_SENTINEL_VALUE,
+                    properties: {
+                        $current_url: 'http://localhost:8000',
+                        [COOKIELESS_MODE_FLAG_PROPERTY]: 'stateless',
+                        $raw_user_agent: 'Mozilla/5.0 (Macintosh)',
+                        $ip: '192.168.1.1',
+                        $host: 'example.com',
+                    },
+                }),
+            ]
+            await ingester.handleKafkaBatch(createKafkaMessages(events, team2.api_token))
+
+            const eventMessages = mockProducerObserver.getProducedKafkaMessagesForTopic('clickhouse_events_json_test')
+            // Should be dropped because team2 doesn't have cookieless enabled
+            expect(eventMessages).toHaveLength(0)
+        })
+
+        it('should pass through non-cookieless events unchanged', async () => {
+            const events = [createEvent({ distinct_id: 'regular-user' })]
+            await ingester.handleKafkaBatch(createKafkaMessages(events))
+
+            const eventMessages = mockProducerObserver.getProducedKafkaMessagesForTopic('clickhouse_events_json_test')
+            expect(eventMessages).toHaveLength(1)
+            expect(eventMessages[0].value.distinct_id).toBe('regular-user')
+        })
+    })
+
+    describe('readonly rate limit to overflow', () => {
+        it('should pass through events when overflow is not enabled (no Redis repository)', async () => {
+            // Default test setup has INGESTION_STATEFUL_OVERFLOW_ENABLED = false,
+            // so no overflow redirect service is created
+            const events = [createEvent({ distinct_id: 'user-1' })]
+            await ingester.handleKafkaBatch(createKafkaMessages(events))
+
+            const eventMessages = mockProducerObserver.getProducedKafkaMessagesForTopic('clickhouse_events_json_test')
+            expect(eventMessages).toHaveLength(1)
         })
     })
 

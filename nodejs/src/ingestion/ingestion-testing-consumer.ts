@@ -4,7 +4,13 @@ import { instrumentFn } from '~/common/tracing/tracing-utils'
 
 import { KafkaConsumer } from '../kafka/consumer'
 import { KafkaProducerWrapper } from '../kafka/producer'
-import { HealthCheckResult, HealthCheckResultError, PluginServerService, PluginsServerConfig } from '../types'
+import {
+    HealthCheckResult,
+    HealthCheckResultError,
+    PluginServerService,
+    PluginsServerConfig,
+    RedisPool,
+} from '../types'
 import { logger } from '../utils/logger'
 import { PromiseScheduler } from '../utils/promise-scheduler'
 import { TeamManager } from '../utils/team-manager'
@@ -17,12 +23,14 @@ import {
     TestingJoinedIngestionPipelineInput,
     createTestingJoinedIngestionPipeline,
 } from './analytics/testing-joined-ingestion-pipeline'
+import { CookielessManager } from './cookieless/cookieless-manager'
 import { EVENTS_OUTPUT, IngestionOutputs } from './event-processing/ingestion-outputs'
 import { latestOffsetTimestampGauge } from './ingestion-consumer'
 import { BatchPipeline } from './pipelines/batch-pipeline.interface'
 import { newBatchPipelineBuilder } from './pipelines/builders'
 import { createContext } from './pipelines/helpers'
 import { ok } from './pipelines/results'
+import { OverflowRedisRepository, RedisOverflowRepository } from './utils/overflow-redirect/overflow-redis-repository'
 
 export type IngestionTestingConsumerFullConfig = Pick<
     PluginsServerConfig,
@@ -30,10 +38,13 @@ export type IngestionTestingConsumerFullConfig = Pick<
     | 'INGESTION_CONSUMER_CONSUME_TOPIC'
     | 'INGESTION_CONSUMER_GROUP_ID'
     | 'INGESTION_CONSUMER_DLQ_TOPIC'
+    | 'INGESTION_CONSUMER_OVERFLOW_TOPIC'
     | 'CLICKHOUSE_JSON_EVENTS_KAFKA_TOPIC'
     | 'CLICKHOUSE_HEATMAPS_KAFKA_TOPIC'
     | 'KAFKA_BATCH_START_LOGGING_ENABLED'
     | 'PERSONS_PREFETCH_ENABLED'
+    | 'INGESTION_STATEFUL_OVERFLOW_ENABLED'
+    | 'INGESTION_STATEFUL_OVERFLOW_REDIS_TTL_SECONDS'
 >
 
 export interface IngestionTestingConsumerDeps {
@@ -41,6 +52,8 @@ export interface IngestionTestingConsumerDeps {
     kafkaProducer: KafkaProducerWrapper
     personRepository: PersonRepository
     teamManager: TeamManager
+    cookielessManager: CookielessManager
+    redisPool: RedisPool
 }
 
 export class IngestionTestingConsumer {
@@ -48,10 +61,12 @@ export class IngestionTestingConsumer {
     protected groupId: string
     protected topic: string
     protected dlqTopic: string
+    protected overflowTopic: string
     protected kafkaConsumer: KafkaConsumer
     isStopping = false
     protected kafkaProducer?: KafkaProducerWrapper
     private personsStore: ReadonlyPersonsStore
+    private overflowRedisRepository?: OverflowRedisRepository
     public readonly promiseScheduler = new PromiseScheduler()
 
     private joinedPipeline!: BatchPipeline<
@@ -67,13 +82,17 @@ export class IngestionTestingConsumer {
         overrides: Partial<
             Pick<
                 PluginsServerConfig,
-                'INGESTION_CONSUMER_CONSUME_TOPIC' | 'INGESTION_CONSUMER_GROUP_ID' | 'INGESTION_CONSUMER_DLQ_TOPIC'
+                | 'INGESTION_CONSUMER_CONSUME_TOPIC'
+                | 'INGESTION_CONSUMER_GROUP_ID'
+                | 'INGESTION_CONSUMER_DLQ_TOPIC'
+                | 'INGESTION_CONSUMER_OVERFLOW_TOPIC'
             >
         > = {}
     ) {
         this.groupId = overrides.INGESTION_CONSUMER_GROUP_ID ?? config.INGESTION_CONSUMER_GROUP_ID
         this.topic = overrides.INGESTION_CONSUMER_CONSUME_TOPIC ?? config.INGESTION_CONSUMER_CONSUME_TOPIC
         this.dlqTopic = overrides.INGESTION_CONSUMER_DLQ_TOPIC ?? config.INGESTION_CONSUMER_DLQ_TOPIC
+        this.overflowTopic = overrides.INGESTION_CONSUMER_OVERFLOW_TOPIC ?? config.INGESTION_CONSUMER_OVERFLOW_TOPIC
 
         this.name = `ingestion-testing-consumer-${this.topic}`
 
@@ -85,6 +104,14 @@ export class IngestionTestingConsumer {
         // Single WarpStream producer used for all output (events, DLQ, internal messages)
         this.kafkaProducer = this.deps.kafkaProducer
         this.personsStore = new ReadonlyPersonsStore(this.deps.personRepository)
+
+        // Create readonly overflow Redis repository for checking already-flagged keys
+        if (this.config.INGESTION_STATEFUL_OVERFLOW_ENABLED) {
+            this.overflowRedisRepository = new RedisOverflowRepository({
+                redisPool: this.deps.redisPool,
+                redisTTLSeconds: this.config.INGESTION_STATEFUL_OVERFLOW_REDIS_TTL_SECONDS,
+            })
+        }
     }
 
     public get service(): PluginServerService {
@@ -108,6 +135,8 @@ export class IngestionTestingConsumer {
             groupId: this.groupId,
             outputs,
             personsPrefetchEnabled: this.config.PERSONS_PREFETCH_ENABLED,
+            overflowTopic: this.overflowTopic,
+            preservePartitionLocality: true,
             perDistinctIdOptions: {
                 CLICKHOUSE_HEATMAPS_KAFKA_TOPIC: this.config.CLICKHOUSE_HEATMAPS_KAFKA_TOPIC,
             },
@@ -117,6 +146,8 @@ export class IngestionTestingConsumer {
             personsStore: this.personsStore,
             promiseScheduler: this.promiseScheduler,
             teamManager: this.deps.teamManager,
+            cookielessManager: this.deps.cookielessManager,
+            overflowRedisRepository: this.overflowRedisRepository,
         }
         this.joinedPipeline = createTestingJoinedIngestionPipeline(
             newBatchPipelineBuilder<TestingJoinedIngestionPipelineInput, TestingJoinedIngestionPipelineContext>(),
