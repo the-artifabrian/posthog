@@ -13416,6 +13416,9 @@ export namespace Schemas {
       readonly expires_after: string | null;
       /** @nullable */
       readonly exception: string | null;
+      readonly is_stale: boolean;
+      /** @nullable */
+      readonly data_last_refresh: string | null;
     }
 
     /**
