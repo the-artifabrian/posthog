@@ -3,7 +3,7 @@ import json
 import time
 import uuid
 import tempfile
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Literal, Optional
 from urllib.parse import quote
 
@@ -34,6 +34,7 @@ from posthog.schema_migrations.upgrade_manager import upgrade_query
 from posthog.security.url_validation import is_url_allowed
 from posthog.tasks.exporter import EXPORT_TIMER
 from posthog.tasks.exports.exporter_utils import log_error_if_site_url_not_reachable
+from posthog.tasks.exports.failure_handler import EXCEPTIONS_TO_RETRY
 from posthog.utils import absolute_uri
 
 logger = structlog.get_logger(__name__)
@@ -403,6 +404,8 @@ def export_image(
             # Track cache keys for insights so we can pass them to Chrome for guaranteed cache hits
             insight_cache_keys: dict[int, str] = {}
             export_analytics_props: AnalyticsProps = {"source": source or EventSource.EXPORT}
+            is_stale = False
+            stale_timestamps: list[datetime] = []
 
             if exported_asset.insight:
                 logger.info(
@@ -426,16 +429,42 @@ def export_image(
                         tile_filters_override = tile.filters_overrides
 
                 with upgrade_query(exported_asset.insight):
-                    result = calculate_for_query_based_insight(
-                        exported_asset.insight,
-                        team=exported_asset.team,
-                        dashboard=exported_asset.dashboard,
-                        execution_mode=ExecutionMode.CALCULATE_BLOCKING_ALWAYS,
-                        user=None,
-                        variables_override=dashboard_variables,
-                        tile_filters_override=tile_filters_override,
-                        analytics_props=export_analytics_props,
-                    )
+                    try:
+                        result = calculate_for_query_based_insight(
+                            exported_asset.insight,
+                            team=exported_asset.team,
+                            dashboard=exported_asset.dashboard,
+                            execution_mode=ExecutionMode.CALCULATE_BLOCKING_ALWAYS,
+                            user=None,
+                            variables_override=dashboard_variables,
+                            tile_filters_override=tile_filters_override,
+                            analytics_props=export_analytics_props,
+                        )
+                    except EXCEPTIONS_TO_RETRY as original_exc:
+                        if not is_last_attempt:
+                            raise
+                        try:
+                            result = calculate_for_query_based_insight(
+                                exported_asset.insight,
+                                team=exported_asset.team,
+                                dashboard=exported_asset.dashboard,
+                                execution_mode=ExecutionMode.CACHE_ONLY_NEVER_CALCULATE,
+                                user=None,
+                                variables_override=dashboard_variables,
+                                tile_filters_override=tile_filters_override,
+                                analytics_props=export_analytics_props,
+                            )
+                        except Exception:
+                            raise original_exc
+                        if result.result is None:
+                            raise
+                        logger.warning(
+                            "export_image.using_stale_cache",
+                            insight_id=exported_asset.insight.id,
+                        )
+                        is_stale = True
+                        if result.last_refresh:
+                            stale_timestamps.append(result.last_refresh)
                     if result.cache_key:
                         insight_cache_keys[exported_asset.insight.id] = result.cache_key
             elif exported_asset.dashboard:
@@ -459,18 +488,49 @@ def export_image(
                         continue
 
                     with upgrade_query(insight):
-                        result = calculate_for_query_based_insight(
-                            insight,
-                            team=exported_asset.team,
-                            dashboard=exported_asset.dashboard,
-                            execution_mode=ExecutionMode.CALCULATE_BLOCKING_ALWAYS,
-                            user=None,
-                            variables_override=dashboard_variables,
-                            tile_filters_override=tile.filters_overrides,
-                            analytics_props=export_analytics_props,
-                        )
+                        try:
+                            result = calculate_for_query_based_insight(
+                                insight,
+                                team=exported_asset.team,
+                                dashboard=exported_asset.dashboard,
+                                execution_mode=ExecutionMode.CALCULATE_BLOCKING_ALWAYS,
+                                user=None,
+                                variables_override=dashboard_variables,
+                                tile_filters_override=tile.filters_overrides,
+                                analytics_props=export_analytics_props,
+                            )
+                        except EXCEPTIONS_TO_RETRY as original_exc:
+                            if not is_last_attempt:
+                                raise
+                            try:
+                                result = calculate_for_query_based_insight(
+                                    insight,
+                                    team=exported_asset.team,
+                                    dashboard=exported_asset.dashboard,
+                                    execution_mode=ExecutionMode.CACHE_ONLY_NEVER_CALCULATE,
+                                    user=None,
+                                    variables_override=dashboard_variables,
+                                    tile_filters_override=tile.filters_overrides,
+                                    analytics_props=export_analytics_props,
+                                )
+                            except Exception:
+                                raise original_exc
+                            if result.result is None:
+                                raise
+                            logger.warning(
+                                "export_image.using_stale_cache",
+                                insight_id=insight.id,
+                            )
+                            is_stale = True
+                            if result.last_refresh:
+                                stale_timestamps.append(result.last_refresh)
                         if result.cache_key:
                             insight_cache_keys[insight.id] = result.cache_key
+
+            if is_stale:
+                exported_asset.is_stale = True
+                exported_asset.data_last_refresh = min(stale_timestamps) if stale_timestamps else None
+                exported_asset.save(update_fields=["is_stale", "data_last_refresh"])
 
             if exported_asset.export_format == "image/png":
                 with EXPORT_TIMER.labels(type=exported_asset.export_format).time():
