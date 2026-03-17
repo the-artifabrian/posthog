@@ -18,8 +18,11 @@ from dateutil.relativedelta import relativedelta
 from openpyxl import load_workbook
 from requests.exceptions import HTTPError
 
+from posthog.schema import CacheMissResponse
+
 from posthog.hogql.constants import CSV_EXPORT_BREAKDOWN_LIMIT_INITIAL
 
+from posthog.hogql_queries.query_runner import ExecutionMode
 from posthog.models import Action, ExportedAsset
 from posthog.models.utils import UUIDT
 from posthog.settings import (
@@ -1798,3 +1801,73 @@ class TestNestedColumnExport(APIBaseTest):
             # Nested objects should be flattened to dot-notation columns
             assert b"inputState.messages.0.content" in exported_asset.content
             assert b"inputState.messages.1.content" in exported_asset.content
+
+
+@override_settings(SITE_URL="http://testserver")
+class TestCSVExporterCacheFallback(APIBaseTest):
+    def _make_asset(self) -> ExportedAsset:
+        return ExportedAsset.objects.create(
+            team=self.team,
+            export_format=ExportedAsset.ExportFormat.CSV,
+            export_context={"source": {"kind": "EventsQuery", "select": ["event"]}},
+        )
+
+    @patch("posthog.tasks.exports.csv_exporter.process_query_dict")
+    def test_fallback_serves_stale_cache_on_last_attempt(self, mock_process_query):
+        from django.db import OperationalError
+
+        asset = self._make_asset()
+
+        mock_process_query.side_effect = [
+            OperationalError("CH down"),
+            {"results": [["test_event"]], "columns": ["event"], "types": ["String"]},
+        ]
+
+        csv_exporter.export_tabular(asset, is_last_attempt=True)
+
+        asset.refresh_from_db()
+        assert asset.has_content
+        assert asset.is_stale is True
+
+        assert mock_process_query.call_count == 2
+        assert mock_process_query.call_args_list[1][1]["execution_mode"] == ExecutionMode.CACHE_ONLY_NEVER_CALCULATE
+
+    @patch("posthog.tasks.exports.csv_exporter.process_query_dict")
+    def test_fallback_raises_when_cache_miss(self, mock_process_query):
+        from django.db import OperationalError
+
+        asset = self._make_asset()
+
+        mock_process_query.side_effect = [
+            OperationalError("CH down"),
+            CacheMissResponse(cache_key="test_key"),
+        ]
+
+        with pytest.raises(OperationalError, match="CH down"):
+            csv_exporter.export_tabular(asset, is_last_attempt=True)
+
+    @patch("posthog.tasks.exports.csv_exporter.process_query_dict")
+    def test_no_fallback_when_not_last_attempt(self, mock_process_query):
+        from django.db import OperationalError
+
+        asset = self._make_asset()
+        mock_process_query.side_effect = OperationalError("CH down")
+
+        with pytest.raises(OperationalError, match="CH down"):
+            csv_exporter.export_tabular(asset, is_last_attempt=False)
+
+        assert mock_process_query.call_count == 1
+
+    @patch("posthog.tasks.exports.csv_exporter.process_query_dict")
+    def test_fallback_raises_original_when_cache_read_fails(self, mock_process_query):
+        from django.db import OperationalError
+
+        asset = self._make_asset()
+
+        mock_process_query.side_effect = [
+            OperationalError("CH down"),
+            Exception("Redis connection refused"),
+        ]
+
+        with pytest.raises(OperationalError, match="CH down"):
+            csv_exporter.export_tabular(asset, is_last_attempt=True)

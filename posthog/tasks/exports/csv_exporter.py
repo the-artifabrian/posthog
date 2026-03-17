@@ -20,7 +20,7 @@ from pydantic import BaseModel, ValidationError
 from requests.exceptions import HTTPError
 from rest_framework_csv.renderers import CSVRenderer
 
-from posthog.schema import QuerySchemaRoot
+from posthog.schema import CacheMissResponse, QuerySchemaRoot
 
 from posthog.api.services.query import process_query_dict
 from posthog.event_usage import AnalyticsProps, EventSource
@@ -40,7 +40,7 @@ from ...hogql_queries.insights.trends.breakdown import (
     BREAKDOWN_OTHER_STRING_LABEL,
 )
 from ..exporter import EXPORT_TIMER
-from ..exports.failure_handler import ExcelColumnLimitExceeded
+from ..exports.failure_handler import EXCEPTIONS_TO_RETRY, ExcelColumnLimitExceeded
 
 logger = structlog.get_logger(__name__)
 
@@ -131,7 +131,10 @@ class RowBuffer:
 
 @contextmanager
 def _buffer_rows(
-    exported_asset: ExportedAsset, limit: int, analytics_props: Optional[AnalyticsProps] = None
+    exported_asset: ExportedAsset,
+    limit: int,
+    analytics_props: Optional[AnalyticsProps] = None,
+    is_last_attempt: bool = False,
 ) -> Iterator[RowBuffer]:
     """Buffer rows to a temp file, discovering columns along the way.
 
@@ -143,7 +146,7 @@ def _buffer_rows(
     """
     with tempfile.NamedTemporaryFile(mode="w+", suffix=".jsonl", delete=True) as jsonl_file:
         row_count, columns, seen_keys = _write_rows_to_jsonl(
-            jsonl_file, exported_asset, limit, analytics_props=analytics_props
+            jsonl_file, exported_asset, limit, analytics_props=analytics_props, is_last_attempt=is_last_attempt
         )
         jsonl_file.seek(0)
 
@@ -457,7 +460,11 @@ def _query_supports_limit(query: dict) -> bool:
 
 
 def get_from_query(
-    exported_asset: ExportedAsset, limit: int, resource: dict, analytics_props: Optional[AnalyticsProps] = None
+    exported_asset: ExportedAsset,
+    limit: int,
+    resource: dict,
+    analytics_props: Optional[AnalyticsProps] = None,
+    is_last_attempt: bool = False,
 ) -> Generator[Any, None, None]:
     query = resource.get("source")
     assert query is not None
@@ -494,6 +501,34 @@ def get_from_query(
             limit = int(limit / 2)
             query["breakdownFilter"]["breakdown_limit"] = limit
             continue
+        except EXCEPTIONS_TO_RETRY as original_exc:
+            if not is_last_attempt:
+                raise
+            try:
+                query_response = process_query_dict(
+                    team=exported_asset.team,
+                    query_json=paginated_query,
+                    limit_context=LimitContext.EXPORT,
+                    execution_mode=ExecutionMode.CACHE_ONLY_NEVER_CALCULATE,
+                    pagination_cursor=cursor,
+                    analytics_props=analytics_props,
+                )
+            except Exception:
+                raise original_exc
+            if isinstance(query_response, CacheMissResponse):
+                raise
+            logger.warning(
+                "csv_exporter.using_stale_cache",
+                exported_asset_id=exported_asset.id,
+            )
+            exported_asset.is_stale = True
+            if isinstance(query_response, BaseModel):
+                resp_dict = query_response.model_dump(by_alias=True)
+            else:
+                resp_dict = query_response if isinstance(query_response, dict) else {}
+            cached_last_refresh = resp_dict.get("last_refresh")
+            if cached_last_refresh and not exported_asset.data_last_refresh:
+                exported_asset.data_last_refresh = cached_last_refresh
 
         if isinstance(query_response, BaseModel):
             response_dict = query_response.model_dump(by_alias=True)
@@ -526,12 +561,17 @@ def get_from_query(
 
 
 def _iter_rows(
-    exported_asset: ExportedAsset, limit: int, analytics_props: Optional[AnalyticsProps] = None
+    exported_asset: ExportedAsset,
+    limit: int,
+    analytics_props: Optional[AnalyticsProps] = None,
+    is_last_attempt: bool = False,
 ) -> Generator[Any, None, None]:
     resource = exported_asset.export_context or {}
 
     if resource.get("source"):
-        yield from get_from_query(exported_asset, limit, resource, analytics_props=analytics_props)
+        yield from get_from_query(
+            exported_asset, limit, resource, analytics_props=analytics_props, is_last_attempt=is_last_attempt
+        )
     else:
         # Legacy path for PersonsNode exports (uses API path instead of HogQL source).
         # PersonsNode was migrated to ActorsQuery in migration 0459, so this path
@@ -540,7 +580,11 @@ def _iter_rows(
 
 
 def _write_rows_to_jsonl(
-    jsonl_file: Any, exported_asset: ExportedAsset, limit: int, analytics_props: Optional[AnalyticsProps] = None
+    jsonl_file: Any,
+    exported_asset: ExportedAsset,
+    limit: int,
+    analytics_props: Optional[AnalyticsProps] = None,
+    is_last_attempt: bool = False,
 ) -> tuple[int, list[str], set[str]]:
     """Write flattened rows to a JSON lines file, discovering columns as we go.
 
@@ -552,7 +596,7 @@ def _write_rows_to_jsonl(
     seen_keys: set[str] = set()
     row_count = 0
 
-    for row in _iter_rows(exported_asset, limit, analytics_props=analytics_props):
+    for row in _iter_rows(exported_asset, limit, analytics_props=analytics_props, is_last_attempt=is_last_attempt):
         flat_row = dict(renderer.flatten_item(row))
 
         for key in flat_row.keys():
@@ -593,12 +637,18 @@ def _determine_columns(user_columns: list[str], all_keys: list[str], seen_keys: 
 
 
 def _export_tabular(
-    exported_asset: ExportedAsset, limit: int, writer: TabularWriter, analytics_props: Optional[AnalyticsProps] = None
+    exported_asset: ExportedAsset,
+    limit: int,
+    writer: TabularWriter,
+    analytics_props: Optional[AnalyticsProps] = None,
+    is_last_attempt: bool = False,
 ) -> None:
     """Export data using the provided writer."""
     user_columns = (exported_asset.export_context or {}).get("columns", [])
 
-    with _buffer_rows(exported_asset, limit, analytics_props=analytics_props) as buffer:
+    with _buffer_rows(
+        exported_asset, limit, analytics_props=analytics_props, is_last_attempt=is_last_attempt
+    ) as buffer:
         if buffer.row_count == 0:
             columns = user_columns if user_columns else ["error"]
             writer.write_header(columns)
@@ -663,11 +713,23 @@ def export_tabular(
     try:
         with EXPORT_TIMER.labels(type=exported_asset.export_format).time():
             if exported_asset.export_format == ExportedAsset.ExportFormat.CSV:
-                _export_tabular(exported_asset, limit, CsvWriter(), analytics_props=analytics_props)
+                _export_tabular(
+                    exported_asset, limit, CsvWriter(), analytics_props=analytics_props, is_last_attempt=is_last_attempt
+                )
             elif exported_asset.export_format == ExportedAsset.ExportFormat.XLSX:
-                _export_tabular(exported_asset, limit, ExcelWriter(), analytics_props=analytics_props)
+                _export_tabular(
+                    exported_asset,
+                    limit,
+                    ExcelWriter(),
+                    analytics_props=analytics_props,
+                    is_last_attempt=is_last_attempt,
+                )
             else:
                 raise NotImplementedError(f"Export to format {exported_asset.export_format} is not supported")
+
+        # Persist staleness if cache fallback fired during export
+        if exported_asset.is_stale:
+            exported_asset.save(update_fields=["is_stale", "data_last_refresh"])
     except Exception as e:
         if exported_asset:
             team_id = str(exported_asset.team.id)
