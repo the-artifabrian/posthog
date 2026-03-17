@@ -650,7 +650,10 @@ def make_api_call(
 
 
 def export_tabular(
-    exported_asset: ExportedAsset, limit: Optional[int] = None, source: Optional[EventSource] = None
+    exported_asset: ExportedAsset,
+    limit: Optional[int] = None,
+    source: Optional[EventSource] = None,
+    is_last_attempt: bool = False,
 ) -> None:
     if not limit:
         limit = CSV_EXPORT_BREAKDOWN_LIMIT_INITIAL

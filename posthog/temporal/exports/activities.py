@@ -9,6 +9,7 @@ from posthog.sync import database_sync_to_async
 from posthog.tasks import exporter
 from posthog.tasks.exports.failure_handler import FAILURE_TYPE_TIMEOUT_GENERATION, FAILURE_TYPE_USER
 from posthog.temporal.common.heartbeat import Heartbeater
+from posthog.temporal.exports.retry_policy import EXPORT_RETRY_POLICY
 from posthog.temporal.exports.types import (
     EmitExportOutcomeInput,
     ExportAssetActivityInputs,
@@ -36,12 +37,14 @@ async def export_asset_activity(inputs: ExportAssetActivityInputs) -> ExportAsse
             team_id=asset.team_id,
         )
 
+        is_last_attempt = temporalio.activity.info().attempt >= EXPORT_RETRY_POLICY.maximum_attempts
         try:
             await database_sync_to_async(exporter.export_asset_direct, thread_sensitive=False)(
                 asset,
                 limit=inputs.limit,
                 max_height_pixels=inputs.max_height_pixels,
                 source=inputs.source,
+                is_last_attempt=is_last_attempt,
             )
         except Exception:
             await database_sync_to_async(asset.refresh_from_db, thread_sensitive=False)()
