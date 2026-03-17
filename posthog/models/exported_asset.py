@@ -91,6 +91,9 @@ class ExportedAsset(models.Model):
     exception_type = models.CharField(max_length=255, null=True, blank=True)
     # Classification of the failure, see failure_handler.py for details
     failure_type = models.CharField(max_length=255, null=True, blank=True)
+    # Cache fallback staleness tracking (PR3: export resilience)
+    is_stale = models.BooleanField(default=False)
+    data_last_refresh = models.DateTimeField(null=True, blank=True)
 
     # DEPRECATED: We now use JWT for accessing assets
     access_token = models.CharField(max_length=400, null=True, blank=True, default=get_default_access_token)

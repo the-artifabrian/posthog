@@ -312,3 +312,31 @@ class TestImageExporter(APIBaseTest):
             assert call_kwargs["tile_filters_override"] == tile_filters, (
                 "tile_filters_override should match tile filters"
             )
+
+
+class TestExportedAssetStalenessFields(APIBaseTest):
+    def test_staleness_fields_default_values(self):
+        insight = Insight.objects.create(team=self.team)
+        asset = ExportedAsset.objects.create(
+            team=self.team,
+            export_format=ExportedAsset.ExportFormat.PNG,
+            insight=insight,
+        )
+        assert asset.is_stale is False
+        assert asset.data_last_refresh is None
+
+    def test_staleness_fields_can_be_set(self):
+        from django.utils.timezone import now as tz_now
+
+        insight = Insight.objects.create(team=self.team)
+        refresh_time = tz_now()
+        asset = ExportedAsset.objects.create(
+            team=self.team,
+            export_format=ExportedAsset.ExportFormat.PNG,
+            insight=insight,
+            is_stale=True,
+            data_last_refresh=refresh_time,
+        )
+        asset.refresh_from_db()
+        assert asset.is_stale is True
+        assert asset.data_last_refresh == refresh_time
