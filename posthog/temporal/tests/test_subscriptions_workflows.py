@@ -22,7 +22,6 @@ from posthog.models.insight import Insight
 from posthog.models.instance_setting import set_instance_setting
 from posthog.temporal.exports.activities import emit_export_outcome_events, export_asset_activity
 from posthog.temporal.subscriptions.subscription_scheduling_workflow import (
-    DeliverSubscriptionReportActivityInputs,
     DeliverSubscriptionWorkflow,
     DeliverSubscriptionWorkflowInputs,
     HandleSubscriptionValueChangeWorkflow,
@@ -30,7 +29,6 @@ from posthog.temporal.subscriptions.subscription_scheduling_workflow import (
     ScheduleAllSubscriptionsWorkflow,
     ScheduleAllSubscriptionsWorkflowInputs,
     deliver_subscription,
-    deliver_subscription_report_activity,
     fetch_due_subscriptions_activity,
     prepare_subscription_assets,
 )
@@ -47,8 +45,18 @@ async def subscriptions_worker(temporal_client: Client):
     async with Worker(
         temporal_client,
         task_queue=settings.TEMPORAL_TASK_QUEUE,
-        workflows=[ScheduleAllSubscriptionsWorkflow, HandleSubscriptionValueChangeWorkflow],
-        activities=[deliver_subscription_report_activity, fetch_due_subscriptions_activity],
+        workflows=[
+            ScheduleAllSubscriptionsWorkflow,
+            HandleSubscriptionValueChangeWorkflow,
+            DeliverSubscriptionWorkflow,
+        ],
+        activities=[
+            fetch_due_subscriptions_activity,
+            prepare_subscription_assets,
+            export_asset_activity,
+            deliver_subscription,
+            emit_export_outcome_events,
+        ],
         workflow_runner=UnsandboxedWorkflowRunner(),
     ):
         yield  # allow the test to run while the worker is active
@@ -112,8 +120,14 @@ async def test_subscription_delivery_scheduling(
         async with Worker(
             activity_environment.client,
             task_queue=settings.TEMPORAL_TASK_QUEUE,
-            workflows=[ScheduleAllSubscriptionsWorkflow],
-            activities=[deliver_subscription_report_activity, fetch_due_subscriptions_activity],
+            workflows=[ScheduleAllSubscriptionsWorkflow, DeliverSubscriptionWorkflow],
+            activities=[
+                fetch_due_subscriptions_activity,
+                prepare_subscription_assets,
+                export_asset_activity,
+                deliver_subscription,
+                emit_export_outcome_events,
+            ],
             workflow_runner=UnsandboxedWorkflowRunner(),
             activity_executor=ThreadPoolExecutor(max_workers=50),
             debug_mode=True,  # turn off sandbox/deadlock detector
@@ -176,8 +190,14 @@ async def test_does_not_schedule_subscription_if_item_is_deleted(
         async with Worker(
             activity_environment.client,
             task_queue=settings.TEMPORAL_TASK_QUEUE,
-            workflows=[ScheduleAllSubscriptionsWorkflow],
-            activities=[deliver_subscription_report_activity, fetch_due_subscriptions_activity],
+            workflows=[ScheduleAllSubscriptionsWorkflow, DeliverSubscriptionWorkflow],
+            activities=[
+                fetch_due_subscriptions_activity,
+                prepare_subscription_assets,
+                export_asset_activity,
+                deliver_subscription,
+                emit_export_outcome_events,
+            ],
             workflow_runner=UnsandboxedWorkflowRunner(),
             activity_executor=ThreadPoolExecutor(max_workers=50),
             debug_mode=True,  # turn off sandbox/deadlock detector
@@ -226,15 +246,20 @@ async def test_handle_subscription_value_change_email(
         async with Worker(
             activity_environment.client,
             task_queue=settings.TEMPORAL_TASK_QUEUE,
-            workflows=[HandleSubscriptionValueChangeWorkflow],
-            activities=[deliver_subscription_report_activity],
+            workflows=[HandleSubscriptionValueChangeWorkflow, DeliverSubscriptionWorkflow],
+            activities=[
+                prepare_subscription_assets,
+                export_asset_activity,
+                deliver_subscription,
+                emit_export_outcome_events,
+            ],
             workflow_runner=UnsandboxedWorkflowRunner(),
             activity_executor=ThreadPoolExecutor(max_workers=50),
             debug_mode=True,  # turn off sandbox/deadlock detector
         ):
             await activity_environment.client.execute_workflow(
                 HandleSubscriptionValueChangeWorkflow.run,
-                DeliverSubscriptionReportActivityInputs(
+                DeliverSubscriptionWorkflowInputs(
                     subscription_id=subscription.id,
                     previous_value="test_existing@posthog.com",
                     invite_message="My invite message",
@@ -292,15 +317,20 @@ async def test_deliver_subscription_report_slack(
         async with Worker(
             activity_environment.client,
             task_queue=settings.TEMPORAL_TASK_QUEUE,
-            workflows=[HandleSubscriptionValueChangeWorkflow],
-            activities=[deliver_subscription_report_activity],
+            workflows=[HandleSubscriptionValueChangeWorkflow, DeliverSubscriptionWorkflow],
+            activities=[
+                prepare_subscription_assets,
+                export_asset_activity,
+                deliver_subscription,
+                emit_export_outcome_events,
+            ],
             workflow_runner=UnsandboxedWorkflowRunner(),
             activity_executor=ThreadPoolExecutor(max_workers=50),
             debug_mode=True,  # turn off sandbox/deadlock detector
         ):
             await activity_environment.client.execute_workflow(
                 HandleSubscriptionValueChangeWorkflow.run,
-                DeliverSubscriptionReportActivityInputs(subscription_id=subscription.id),
+                DeliverSubscriptionWorkflowInputs(subscription_id=subscription.id),
                 id=str(uuid.uuid4()),
                 task_queue=settings.TEMPORAL_TASK_QUEUE,
             )
