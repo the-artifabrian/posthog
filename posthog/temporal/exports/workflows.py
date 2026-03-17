@@ -54,6 +54,8 @@ class ExportAssetWorkflow(PostHogWorkflow):
                         exported_asset_id=result.exported_asset_id,
                         success=result.success,
                         failure_type=result.failure_type,
+                        is_stale=result.is_stale,
+                        data_last_refresh=result.data_last_refresh,
                     )
                 ],
             ),

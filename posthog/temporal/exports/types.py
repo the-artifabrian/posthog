@@ -23,6 +23,8 @@ class ExportAssetResult:
     exported_asset_id: int
     success: bool
     failure_type: Optional[str] = None
+    is_stale: bool = False
+    data_last_refresh: Optional[str] = None  # ISO format string for Temporal serialization
 
 
 @dataclasses.dataclass
@@ -34,6 +36,8 @@ class ExportOutcomeAsset:
     failure_type: Optional[str] = None
     duration_ms: Optional[float] = None
     attempts: int = 1
+    is_stale: bool = False
+    data_last_refresh: Optional[str] = None
 
 
 @dataclasses.dataclass

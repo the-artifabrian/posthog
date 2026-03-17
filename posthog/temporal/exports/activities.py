@@ -62,6 +62,8 @@ async def export_asset_activity(inputs: ExportAssetActivityInputs) -> ExportAsse
             exported_asset_id=asset.id,
             success=asset.has_content,
             failure_type=asset.failure_type,
+            is_stale=asset.is_stale,
+            data_last_refresh=asset.data_last_refresh.isoformat() if asset.data_last_refresh else None,
         )
 
 
@@ -83,6 +85,8 @@ async def emit_export_outcome_events(inputs: EmitExportOutcomeInput) -> None:
                 "total_attempts": asset_data.attempts,
                 "total_duration_ms": asset_data.duration_ms,
                 "failure_type": asset_data.failure_type,
+                "is_stale": asset_data.is_stale,
+                "data_last_refresh": asset_data.data_last_refresh,
             },
         )
         logger.info(
