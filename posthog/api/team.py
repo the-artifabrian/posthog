@@ -171,6 +171,7 @@ TEAM_CONFIG_FIELDS = (
     "session_recording_url_blocklist_config",
     "session_recording_event_trigger_config",
     "session_recording_trigger_match_type_config",
+    "session_recording_trigger_groups",
     "session_recording_retention_period",
     "session_replay_config",
     "survey_config",
@@ -509,6 +510,159 @@ class TeamSerializer(serializers.ModelSerializer, UserPermissionsSerializerMixin
             )
 
         return value
+
+    @staticmethod
+    def validate_session_recording_trigger_groups(value) -> dict | None:
+        """
+        Validate V2 trigger groups configuration.
+
+        Expected schema:
+        {
+            "version": 2,
+            "groups": [
+                {
+                    "id": "string",
+                    "name": "string" (optional),
+                    "sampleRate": 0.0-1.0,
+                    "order": int,
+                    "conditions": {
+                        "matchType": "any" | "all",
+                        "events": ["event1", ...] (optional),
+                        "urls": [{"url": "regex", "matching": "regex"}] (optional),
+                        "flags": ["flag1" | {"flag": "flag2", "variant": "test"}] (optional)
+                    }
+                }
+            ],
+            "groupEvaluationMode": "first_match" | "highest_priority",
+            "fallbackSampleRate": 0.0-1.0 (optional)
+        }
+        """
+        if value is None:
+            return None
+
+        if not isinstance(value, dict):
+            raise exceptions.ValidationError("Must provide a dictionary or None.")
+
+        # Validate version
+        if "version" not in value:
+            raise exceptions.ValidationError("Missing required field: 'version'.")
+
+        if value["version"] != 2:
+            raise exceptions.ValidationError(f"Invalid version: {value['version']}. Only version 2 is supported.")
+
+        # Validate groups array
+        if "groups" not in value:
+            raise exceptions.ValidationError("Missing required field: 'groups'.")
+
+        if not isinstance(value["groups"], list):
+            raise exceptions.ValidationError("Field 'groups' must be an array.")
+
+        # Validate each group
+        for idx, group in enumerate(value["groups"]):
+            TeamSerializer._validate_trigger_group(group, idx)
+
+        # Validate evaluation mode
+        if "groupEvaluationMode" in value:
+            valid_modes = ["first_match", "highest_priority"]
+            if value["groupEvaluationMode"] not in valid_modes:
+                raise exceptions.ValidationError(
+                    f"Invalid groupEvaluationMode: '{value['groupEvaluationMode']}'. "
+                    f"Must be one of: {', '.join(valid_modes)}."
+                )
+
+        # Validate fallback sample rate if present
+        if "fallbackSampleRate" in value:
+            rate = value["fallbackSampleRate"]
+            if not isinstance(rate, (int, float)) or not (0 <= rate <= 1):
+                raise exceptions.ValidationError(
+                    f"Invalid fallbackSampleRate: {rate}. Must be a number between 0 and 1."
+                )
+
+        return value
+
+    @staticmethod
+    def _validate_trigger_group(group: dict, index: int) -> None:
+        """Validate a single trigger group."""
+        if not isinstance(group, dict):
+            raise exceptions.ValidationError(f"Group {index}: must be a dictionary.")
+
+        # Required fields
+        required_fields = ["id", "sampleRate", "order", "conditions"]
+        for field in required_fields:
+            if field not in group:
+                raise exceptions.ValidationError(f"Group {index}: missing required field '{field}'.")
+
+        # Validate sampleRate
+        rate = group["sampleRate"]
+        if not isinstance(rate, (int, float)) or not (0 <= rate <= 1):
+            raise exceptions.ValidationError(
+                f"Group {index}: invalid sampleRate '{rate}'. Must be a number between 0 and 1."
+            )
+
+        # Validate order
+        if not isinstance(group["order"], int):
+            raise exceptions.ValidationError(f"Group {index}: field 'order' must be an integer.")
+
+        # Validate conditions
+        conditions = group["conditions"]
+        if not isinstance(conditions, dict):
+            raise exceptions.ValidationError(f"Group {index}: field 'conditions' must be a dictionary.")
+
+        # Validate matchType
+        if "matchType" in conditions:
+            if conditions["matchType"] not in ["any", "all"]:
+                raise exceptions.ValidationError(
+                    f"Group {index}: invalid matchType '{conditions['matchType']}'. Must be 'any' or 'all'."
+                )
+
+        # Validate events array if present
+        if "events" in conditions:
+            if not isinstance(conditions["events"], list):
+                raise exceptions.ValidationError(f"Group {index}: field 'events' must be an array.")
+            for event in conditions["events"]:
+                if not isinstance(event, str):
+                    raise exceptions.ValidationError(f"Group {index}: event names must be strings.")
+
+        # Validate URLs array if present
+        if "urls" in conditions:
+            if not isinstance(conditions["urls"], list):
+                raise exceptions.ValidationError(f"Group {index}: field 'urls' must be an array.")
+            for url_config in conditions["urls"]:
+                if not isinstance(url_config, dict):
+                    raise exceptions.ValidationError(f"Group {index}: URL config must be a dictionary.")
+                if "url" not in url_config or "matching" not in url_config:
+                    raise exceptions.ValidationError(
+                        f"Group {index}: URL config must have 'url' and 'matching' fields."
+                    )
+                if url_config["matching"] != "regex":
+                    raise exceptions.ValidationError(
+                        f"Group {index}: URL matching must be 'regex'. Got: '{url_config['matching']}'."
+                    )
+                # Validate regex pattern
+                try:
+                    import re
+
+                    re.compile(url_config["url"])
+                except re.error as e:
+                    raise exceptions.ValidationError(
+                        f"Group {index}: invalid regex pattern '{url_config['url']}': {str(e)}."
+                    )
+
+        # Validate flags array if present
+        if "flags" in conditions:
+            if not isinstance(conditions["flags"], list):
+                raise exceptions.ValidationError(f"Group {index}: field 'flags' must be an array.")
+            for flag_config in conditions["flags"]:
+                if isinstance(flag_config, str):
+                    continue  # Simple flag name is valid
+                elif isinstance(flag_config, dict):
+                    if "flag" not in flag_config:
+                        raise exceptions.ValidationError(f"Group {index}: flag object must have 'flag' field.")
+                    # variant is optional
+                else:
+                    raise exceptions.ValidationError(
+                        f"Group {index}: flag must be a string or object with 'flag' field."
+                    )
 
     @staticmethod
     def validate_session_recording_retention_period(value) -> Literal["30d", "90d", "1y", "5y"] | None:

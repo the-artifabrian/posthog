@@ -2338,6 +2338,233 @@ def team_api_test_factory():
                 1,
             )
 
+        def test_can_set_session_recording_trigger_groups(self):
+            """Test that we can create and update session_recording_trigger_groups field"""
+            trigger_groups = {
+                "version": 2,
+                "groups": [
+                    {
+                        "id": "test-group-1",
+                        "name": "Test Group",
+                        "sampleRate": 0.5,
+                        "order": 0,
+                        "conditions": {
+                            "matchType": "any",
+                            "events": ["pageview"],
+                        },
+                    }
+                ],
+                "groupEvaluationMode": "first_match",
+            }
+
+            # Test creating with trigger groups
+            response = self.client.patch(
+                f"/api/environments/{self.team.id}/",
+                {"session_recording_trigger_groups": trigger_groups},
+            )
+
+            assert response.status_code == status.HTTP_200_OK
+            assert response.json()["session_recording_trigger_groups"] == trigger_groups
+
+            # Test that it persisted
+            self.team.refresh_from_db()
+            assert self.team.session_recording_trigger_groups == trigger_groups
+
+            # Test updating
+            trigger_groups["groups"][0]["sampleRate"] = 1.0
+            response = self.client.patch(
+                f"/api/environments/{self.team.id}/",
+                {"session_recording_trigger_groups": trigger_groups},
+            )
+
+            assert response.status_code == status.HTTP_200_OK
+            assert response.json()["session_recording_trigger_groups"]["groups"][0]["sampleRate"] == 1.0
+
+            # Test clearing (set to null)
+            response = self.client.patch(
+                f"/api/environments/{self.team.id}/",
+                {"session_recording_trigger_groups": None},
+            )
+
+            assert response.status_code == status.HTTP_200_OK
+            assert response.json()["session_recording_trigger_groups"] is None
+
+        def test_session_recording_trigger_groups_validation_missing_version(self):
+            """Test validation fails when version is missing"""
+            response = self.client.patch(
+                f"/api/environments/{self.team.id}/",
+                {"session_recording_trigger_groups": {"groups": []}},
+            )
+
+            assert response.status_code == status.HTTP_400_BAD_REQUEST
+            assert "version" in str(response.json())
+
+        def test_session_recording_trigger_groups_validation_invalid_version(self):
+            """Test validation fails for unsupported version"""
+            response = self.client.patch(
+                f"/api/environments/{self.team.id}/",
+                {"session_recording_trigger_groups": {"version": 1, "groups": []}},
+            )
+
+            assert response.status_code == status.HTTP_400_BAD_REQUEST
+            assert "version" in str(response.json()).lower()
+
+        def test_session_recording_trigger_groups_validation_missing_groups(self):
+            """Test validation fails when groups array is missing"""
+            response = self.client.patch(
+                f"/api/environments/{self.team.id}/",
+                {"session_recording_trigger_groups": {"version": 2}},
+            )
+
+            assert response.status_code == status.HTTP_400_BAD_REQUEST
+            assert "groups" in str(response.json())
+
+        def test_session_recording_trigger_groups_validation_invalid_sample_rate(self):
+            """Test validation fails with invalid sample rate"""
+            trigger_groups = {
+                "version": 2,
+                "groups": [
+                    {
+                        "id": "test",
+                        "sampleRate": 1.5,  # Invalid: > 1
+                        "order": 0,
+                        "conditions": {"matchType": "any"},
+                    }
+                ],
+            }
+
+            response = self.client.patch(
+                f"/api/environments/{self.team.id}/",
+                {"session_recording_trigger_groups": trigger_groups},
+            )
+
+            assert response.status_code == status.HTTP_400_BAD_REQUEST
+            assert "sampleRate" in str(response.json())
+
+        def test_session_recording_trigger_groups_validation_negative_sample_rate(self):
+            """Test validation fails with negative sample rate"""
+            trigger_groups = {
+                "version": 2,
+                "groups": [
+                    {
+                        "id": "test",
+                        "sampleRate": -0.1,  # Invalid: < 0
+                        "order": 0,
+                        "conditions": {"matchType": "any"},
+                    }
+                ],
+            }
+
+            response = self.client.patch(
+                f"/api/environments/{self.team.id}/",
+                {"session_recording_trigger_groups": trigger_groups},
+            )
+
+            assert response.status_code == status.HTTP_400_BAD_REQUEST
+            assert "sampleRate" in str(response.json())
+
+        def test_session_recording_trigger_groups_validation_invalid_match_type(self):
+            """Test validation fails with invalid matchType"""
+            trigger_groups = {
+                "version": 2,
+                "groups": [
+                    {
+                        "id": "test",
+                        "sampleRate": 0.5,
+                        "order": 0,
+                        "conditions": {"matchType": "invalid"},  # Invalid
+                    }
+                ],
+            }
+
+            response = self.client.patch(
+                f"/api/environments/{self.team.id}/",
+                {"session_recording_trigger_groups": trigger_groups},
+            )
+
+            assert response.status_code == status.HTTP_400_BAD_REQUEST
+            assert "matchType" in str(response.json())
+
+        def test_session_recording_trigger_groups_validation_invalid_regex(self):
+            """Test validation fails with invalid regex pattern"""
+            trigger_groups = {
+                "version": 2,
+                "groups": [
+                    {
+                        "id": "test",
+                        "sampleRate": 0.5,
+                        "order": 0,
+                        "conditions": {
+                            "matchType": "any",
+                            "urls": [{"url": "[invalid(regex", "matching": "regex"}],  # Invalid regex
+                        },
+                    }
+                ],
+            }
+
+            response = self.client.patch(
+                f"/api/environments/{self.team.id}/",
+                {"session_recording_trigger_groups": trigger_groups},
+            )
+
+            assert response.status_code == status.HTTP_400_BAD_REQUEST
+            assert "regex" in str(response.json()).lower()
+
+        def test_session_recording_trigger_groups_validation_invalid_evaluation_mode(self):
+            """Test validation fails with invalid groupEvaluationMode"""
+            trigger_groups = {
+                "version": 2,
+                "groups": [],
+                "groupEvaluationMode": "invalid_mode",  # Invalid
+            }
+
+            response = self.client.patch(
+                f"/api/environments/{self.team.id}/",
+                {"session_recording_trigger_groups": trigger_groups},
+            )
+
+            assert response.status_code == status.HTTP_400_BAD_REQUEST
+            assert "groupEvaluationMode" in str(response.json())
+
+        def test_session_recording_trigger_groups_complex_valid_config(self):
+            """Test that complex valid configurations pass validation"""
+            trigger_groups = {
+                "version": 2,
+                "groups": [
+                    {
+                        "id": "errors",
+                        "name": "Error Tracking",
+                        "sampleRate": 1.0,
+                        "order": 0,
+                        "conditions": {
+                            "matchType": "any",
+                            "events": ["error", "crash"],
+                            "urls": [{"url": "/checkout.*", "matching": "regex"}],
+                        },
+                    },
+                    {
+                        "id": "feature-flag",
+                        "name": "Feature Flag Testing",
+                        "sampleRate": 0.5,
+                        "order": 1,
+                        "conditions": {
+                            "matchType": "all",
+                            "flags": ["new-feature", {"flag": "variant-test", "variant": "control"}],
+                        },
+                    },
+                ],
+                "groupEvaluationMode": "first_match",
+                "fallbackSampleRate": 0.01,
+            }
+
+            response = self.client.patch(
+                f"/api/environments/{self.team.id}/",
+                {"session_recording_trigger_groups": trigger_groups},
+            )
+
+            assert response.status_code == status.HTTP_200_OK
+            assert response.json()["session_recording_trigger_groups"] == trigger_groups
+
     return TestTeamAPI
 
 
