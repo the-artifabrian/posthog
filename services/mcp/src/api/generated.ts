@@ -23310,6 +23310,8 @@ export namespace Schemas {
        * @nullable
        */
       session_recording_trigger_match_type_config?: string | null;
+      /** V2 trigger groups configuration for session recording. If present, takes precedence over legacy trigger fields. */
+      session_recording_trigger_groups?: unknown | null;
       session_recording_retention_period?: SessionRecordingRetentionPeriodEnum;
       session_replay_config?: unknown | null;
       survey_config?: unknown | null;
@@ -27725,6 +27727,8 @@ export namespace Schemas {
        * @nullable
        */
       session_recording_trigger_match_type_config?: string | null;
+      /** V2 trigger groups configuration for session recording. If present, takes precedence over legacy trigger fields. */
+      session_recording_trigger_groups?: unknown | null;
       session_recording_retention_period?: SessionRecordingRetentionPeriodEnum;
       session_replay_config?: unknown | null;
       survey_config?: unknown | null;
