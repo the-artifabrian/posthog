@@ -9,8 +9,7 @@ from django.utils import timezone
 from posthog.exceptions_capture import capture_exception
 from posthog.models.activity_logging.model_activity import ModelActivityMixin
 
-from .personal_api_key import hash_key_value
-from .utils import generate_random_token
+from .utils import generate_random_token, hash_key_value
 
 FIVE_DAYS = 60 * 60 * 24 * 5  # 5 days in seconds
 

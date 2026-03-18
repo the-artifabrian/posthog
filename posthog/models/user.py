@@ -19,9 +19,9 @@ from posthog.settings import INSTANCE_TAG, SITE_URL
 from posthog.utils import get_instance_realm
 
 from .organization import Organization, OrganizationMembership
-from .personal_api_key import PersonalAPIKey, hash_key_value
+from .personal_api_key import PersonalAPIKey
 from .team import Team
-from .utils import UUIDTClassicModel, generate_random_token, sane_repr
+from .utils import UUIDTClassicModel, generate_random_token, hash_key_value, sane_repr
 
 
 class Notifications(TypedDict, total=False):

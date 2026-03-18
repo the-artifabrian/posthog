@@ -13,8 +13,9 @@ from django.db import transaction
 from django.db.models import Q
 
 from posthog.models.organization import OrganizationMembership
-from posthog.models.personal_api_key import PersonalAPIKey, hash_key_value
+from posthog.models.personal_api_key import PersonalAPIKey
 from posthog.models.team.team import Team
+from posthog.models.utils import hash_key_value
 from posthog.storage.hypercache import HyperCache, HyperCacheStoreMissing, KeyType
 
 logger = logging.getLogger(__name__)

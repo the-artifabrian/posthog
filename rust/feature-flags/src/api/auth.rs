@@ -131,7 +131,7 @@ pub async fn validate_project_secret_api_key_for_team(
 }
 
 /// Hash an API key value using SHA256
-/// Ported from PostHog's `hash_key_value` function in `posthog/models/personal_api_key.py`
+/// Ported from PostHog's `hash_key_value` function in `posthog/models/utils.py`
 /// Used by both PersonalAPIKey and ProjectSecretAPIKey
 pub(crate) fn hash_key_value(value: &str) -> String {
     use sha2::{Digest, Sha256};

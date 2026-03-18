@@ -10,7 +10,7 @@ from django.test import TestCase
 
 from parameterized import parameterized
 
-from posthog.models.personal_api_key import hash_key_value
+from posthog.models.utils import hash_key_value
 from posthog.storage.team_access_cache import (
     TeamAccessTokenCache,
     get_teams_for_single_personal_api_key,
@@ -99,7 +99,7 @@ class TestTeamAccessCacheIntegration(TestCase):
     def test_warm_team_token_cache(self, scope, description):
         """Test warming team token cache from database with real data."""
         from posthog.models import Organization, OrganizationMembership, PersonalAPIKey, Team, User
-        from posthog.models.personal_api_key import hash_key_value
+        from posthog.models.utils import hash_key_value
 
         # Create real test data
         scope_suffix = scope.split(":")[1]  # 'read' or 'write'
@@ -171,7 +171,7 @@ class TestTeamAccessCacheIntegration(TestCase):
         or empty scopes.
         """
         from posthog.models import Organization, OrganizationMembership, PersonalAPIKey, Team, User
-        from posthog.models.personal_api_key import hash_key_value
+        from posthog.models.utils import hash_key_value
 
         # Create real test data
         organization = Organization.objects.create(name="Test Organization All Access")
@@ -215,7 +215,7 @@ class TestTeamAccessCacheIntegration(TestCase):
     def test_warm_team_token_cache_with_scoped_all_access(self):
         """Test that team-scoped personal API keys with '*' scope are included in cache."""
         from posthog.models import Organization, OrganizationMembership, PersonalAPIKey, Team, User
-        from posthog.models.personal_api_key import hash_key_value
+        from posthog.models.utils import hash_key_value
 
         # Create real test data
         organization = Organization.objects.create(name="Test Org Scoped All Access")
@@ -322,7 +322,7 @@ class TestCacheWarmingWithUnscopedKeys(TestCase):
     def test_warm_team_cache_includes_unscoped_keys(self):
         """Test that cache warming includes unscoped PersonalAPIKeys."""
         from posthog.models import Organization, OrganizationMembership, PersonalAPIKey, Team, User
-        from posthog.models.personal_api_key import hash_key_value
+        from posthog.models.utils import hash_key_value
 
         # Create real test data
         organization = Organization.objects.create(name="Test Organization")
@@ -390,7 +390,7 @@ class TestCacheWarmingWithUnscopedKeys(TestCase):
     def test_warm_team_cache_no_unscoped_keys(self):
         """Test cache warming when there are no unscoped PersonalAPIKeys."""
         from posthog.models import Organization, OrganizationMembership, PersonalAPIKey, Team, User
-        from posthog.models.personal_api_key import hash_key_value
+        from posthog.models.utils import hash_key_value
 
         # Create real test data with only scoped keys
         organization = Organization.objects.create(name="Test Organization")
@@ -428,7 +428,7 @@ class TestCacheWarmingWithUnscopedKeys(TestCase):
     def test_warm_team_cache_duplicate_key_handling(self):
         """Test that duplicate keys between scoped and unscoped are handled correctly."""
         from posthog.models import Organization, OrganizationMembership, PersonalAPIKey, Team, User
-        from posthog.models.personal_api_key import hash_key_value
+        from posthog.models.utils import hash_key_value
 
         # Create real test data - scenario where same user might have key that could match both scoped/unscoped
         organization = Organization.objects.create(name="Test Organization")
@@ -478,7 +478,7 @@ class TestGetTeamsForPersonalAPIKey(TestCase):
     def test_get_teams_for_scoped_personal_api_key(self):
         """Test getting teams for a PersonalAPIKey with scoped teams."""
         from posthog.models import Organization, OrganizationMembership, PersonalAPIKey, Team, User
-        from posthog.models.personal_api_key import hash_key_value
+        from posthog.models.utils import hash_key_value
 
         # Create real test data
         organization = Organization.objects.create(name="Test Organization")
@@ -510,7 +510,7 @@ class TestGetTeamsForPersonalAPIKey(TestCase):
     def test_get_teams_for_unscoped_personal_api_key(self):
         """Test getting teams for an unscoped PersonalAPIKey (all user's org teams)."""
         from posthog.models import Organization, OrganizationMembership, PersonalAPIKey, Team, User
-        from posthog.models.personal_api_key import hash_key_value
+        from posthog.models.utils import hash_key_value
 
         # Create real test data - multiple organizations
         org1 = Organization.objects.create(name="Organization 1")
@@ -547,7 +547,7 @@ class TestGetTeamsForPersonalAPIKey(TestCase):
     def test_get_teams_for_unscoped_personal_api_key_empty_scoped_teams(self):
         """Test getting teams for PersonalAPIKey with empty scoped_teams list."""
         from posthog.models import Organization, OrganizationMembership, PersonalAPIKey, Team, User
-        from posthog.models.personal_api_key import hash_key_value
+        from posthog.models.utils import hash_key_value
 
         # Create real test data
         organization = Organization.objects.create(name="Test Organization")
@@ -575,7 +575,7 @@ class TestGetTeamsForPersonalAPIKey(TestCase):
     def test_get_teams_for_unscoped_personal_api_key_no_organizations(self):
         """Test getting teams when user has no organization memberships."""
         from posthog.models import PersonalAPIKey, User
-        from posthog.models.personal_api_key import hash_key_value
+        from posthog.models.utils import hash_key_value
 
         # Create user without any organization memberships
         user = User.objects.create(email="test@example.com", is_active=True)
@@ -597,7 +597,7 @@ class TestGetTeamsForPersonalAPIKey(TestCase):
     def test_get_teams_for_scoped_personal_api_key_nonexistent_team_ids(self):
         """Test getting teams for PersonalAPIKey with non-existent scoped team IDs."""
         from posthog.models import Organization, OrganizationMembership, PersonalAPIKey, User
-        from posthog.models.personal_api_key import hash_key_value
+        from posthog.models.utils import hash_key_value
 
         # Create real test data
         organization = Organization.objects.create(name="Test Organization")
@@ -2730,8 +2730,7 @@ class TestSecretTokenRotation(TestCase):
     @patch("django.db.transaction.on_commit", side_effect=lambda func: func())
     def test_secret_api_token_changes_update_cache(self, mock_on_commit):
         """Test that changing secret_api_token updates the cache correctly."""
-        from posthog.models.personal_api_key import hash_key_value
-        from posthog.models.utils import generate_random_token_secret
+        from posthog.models.utils import generate_random_token_secret, hash_key_value
 
         # Warm initial cache
         warm_team_token_cache(self.team.api_token)
@@ -2756,8 +2755,7 @@ class TestSecretTokenRotation(TestCase):
     @patch("django.db.transaction.on_commit", side_effect=lambda func: func())
     def test_secret_api_token_backup_changes_update_cache(self, mock_on_commit):
         """Test that changing secret_api_token_backup updates the cache correctly."""
-        from posthog.models.personal_api_key import hash_key_value
-        from posthog.models.utils import generate_random_token_secret
+        from posthog.models.utils import generate_random_token_secret, hash_key_value
 
         # Warm initial cache
         warm_team_token_cache(self.team.api_token)
@@ -2872,8 +2870,7 @@ class TestTeamAPITokenRegeneration(TestCase):
     @patch("django.db.transaction.on_commit", side_effect=lambda func: func())
     def test_api_token_change_preserves_data_in_new_cache(self, mock_on_commit):
         """Test that changing API token preserves all token data in new cache."""
-        from posthog.models.personal_api_key import hash_key_value
-        from posthog.models.utils import generate_random_token_project
+        from posthog.models.utils import generate_random_token_project, hash_key_value
 
         # Warm initial cache
         warm_team_token_cache(self.initial_api_token)
