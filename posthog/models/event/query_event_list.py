@@ -1,6 +1,7 @@
 import random
 from datetime import datetime, timedelta
 from typing import Optional, Union
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from django.conf import settings
@@ -19,6 +20,7 @@ from posthog.models.event.sql import (
     SELECT_EVENT_BY_TEAM_AND_CONDITIONS_SQL,
 )
 from posthog.models.person.person import READ_DB_FOR_PERSONS, get_distinct_ids_for_subquery
+from posthog.models.person.util import get_person_by_uuid
 from posthog.models.property.util import parse_prop_grouped_clauses
 from posthog.queries.insight import insight_query_with_columns
 from posthog.utils import relative_date_parse
@@ -50,7 +52,11 @@ def parse_request_params(
             params.update({"before": v})
         elif k == "person_id":
             result += """AND distinct_id IN (%(distinct_ids)s) """
-            person = get_pk_or_uuid(Person.objects.db_manager(READ_DB_FOR_PERSONS).filter(team=team), v).first()
+            try:
+                UUID(v)
+                person = get_person_by_uuid(team.pk, v)
+            except ValueError:
+                person = get_pk_or_uuid(Person.objects.db_manager(READ_DB_FOR_PERSONS).filter(team=team), v).first()
             params.update({"distinct_ids": get_distinct_ids_for_subquery(person, team)})
         elif k == "distinct_id":
             result += "AND distinct_id = %(distinct_id)s "

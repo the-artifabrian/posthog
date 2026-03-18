@@ -815,12 +815,44 @@ def get_feature_flag_hash_key_overrides(
     # Priority to the first distinctID's values, to keep this function deterministic
 
     if not person_id_to_distinct_id_mapping:
-        person_and_distinct_ids = list(
-            PersonDistinctId.objects.db_manager(using_database)
-            .filter(distinct_id__in=distinct_ids, team_id=team_id)
-            .values_list("person_id", "distinct_id")
+        person_id_to_distinct_id: dict[int, str] | None = None
+
+        from posthog.personhog_client.gate import use_personhog
+        from posthog.personhog_client.metrics import (
+            PERSONHOG_ROUTING_ERRORS_TOTAL,
+            PERSONHOG_ROUTING_TOTAL,
+            get_client_name,
         )
-        person_id_to_distinct_id = dict(person_and_distinct_ids)
+
+        if use_personhog():
+            try:
+                from posthog.models.person.util import _fetch_persons_by_distinct_ids_via_personhog
+
+                persons = _fetch_persons_by_distinct_ids_via_personhog(team_id, distinct_ids)
+                person_id_to_distinct_id = {p.id: p.distinct_ids[0] for p in persons if p.distinct_ids}
+                PERSONHOG_ROUTING_TOTAL.labels(
+                    operation="hash_key_override_person_lookup", source="personhog", client_name=get_client_name()
+                ).inc()
+            except Exception:
+                PERSONHOG_ROUTING_ERRORS_TOTAL.labels(
+                    operation="hash_key_override_person_lookup",
+                    source="personhog",
+                    error_type="grpc_error",
+                    client_name=get_client_name(),
+                ).inc()
+                logger.warning("personhog_hash_key_override_person_lookup_failure", team_id=team_id, exc_info=True)
+                person_id_to_distinct_id = None
+
+        if person_id_to_distinct_id is None:
+            person_and_distinct_ids = list(
+                PersonDistinctId.objects.db_manager(using_database)
+                .filter(distinct_id__in=distinct_ids, team_id=team_id)
+                .values_list("person_id", "distinct_id")
+            )
+            person_id_to_distinct_id = dict(person_and_distinct_ids)
+            PERSONHOG_ROUTING_TOTAL.labels(
+                operation="hash_key_override_person_lookup", source="django_orm", client_name=get_client_name()
+            ).inc()
     else:
         person_id_to_distinct_id = person_id_to_distinct_id_mapping
 

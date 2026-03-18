@@ -72,7 +72,7 @@ from posthog.exceptions_capture import capture_exception
 from posthog.models import Organization, Team, User
 from posthog.models.activity_logging.activity_log import Detail, log_activity
 from posthog.models.comment import Comment
-from posthog.models.person.person import READ_DB_FOR_PERSONS, PersonDistinctId
+from posthog.models.person.person import Person, PersonDistinctId
 from posthog.rate_limit import ClickHouseBurstRateThrottle, ClickHouseSustainedRateThrottle, PersonalApiKeyRateThrottle
 from posthog.rbac.access_control_api_mixin import AccessControlViewSetMixin
 from posthog.rbac.user_access_control import UserAccessControlSerializerMixin
@@ -1842,30 +1842,41 @@ def list_recordings_from_query(
     with timer("load_persons"), tracer.start_as_current_span("load_persons"):
         # Get the related persons for all the recordings
         distinct_ids = sorted([x.distinct_id for x in recordings if x.distinct_id])
-        # Use prefetch_related with explicit Person filter to include team_id in Person query
-        from django.db.models import Prefetch
 
-        from posthog.models.person.person import Person
+        from posthog.models.person.util import get_persons_by_distinct_ids
+        from posthog.personhog_client.gate import use_personhog
 
-        person_distinct_ids = (
-            PersonDistinctId.objects.db_manager(READ_DB_FOR_PERSONS)
-            .filter(distinct_id__in=distinct_ids, team=team)
-            .prefetch_related(
-                Prefetch(
-                    "person",
-                    queryset=Person.objects.filter(team_id=team.id),
+        distinct_id_to_person: dict[str, Person] = {}
+        if use_personhog():
+            # personhog returns persons with _distinct_ids already populated
+            persons = get_persons_by_distinct_ids(team.pk, distinct_ids)
+            distinct_ids_set = set(distinct_ids)
+            for person in persons:
+                for did in person.distinct_ids:
+                    if did in distinct_ids_set:
+                        distinct_id_to_person[did] = person
+        else:
+            # ORM path: intentionally set _distinct_ids to a single ID per person
+            # to avoid loading all distinct_ids (which can be very large)
+            from django.db.models import Prefetch
+
+            from posthog.models.person.person import READ_DB_FOR_PERSONS
+
+            person_distinct_ids = (
+                PersonDistinctId.objects.db_manager(READ_DB_FOR_PERSONS)
+                .filter(distinct_id__in=distinct_ids, team=team)
+                .prefetch_related(
+                    Prefetch(
+                        "person",
+                        queryset=Person.objects.filter(team_id=team.id),
+                    )
                 )
             )
-        )
+            for pdi in person_distinct_ids:
+                pdi.person._distinct_ids = [pdi.distinct_id]
+                distinct_id_to_person[pdi.distinct_id] = pdi.person
 
     with timer("process_persons"), tracer.start_as_current_span("process_persons"):
-        distinct_id_to_person = {}
-        for person_distinct_id in person_distinct_ids:
-            person_distinct_id.person._distinct_ids = [
-                person_distinct_id.distinct_id
-            ]  # Stop the person from loading all distinct ids
-            distinct_id_to_person[person_distinct_id.distinct_id] = person_distinct_id.person
-
         for recording in recordings:
             recording.viewed = recording.session_id in viewed_session_recordings
             recording.viewers = other_viewers.get(recording.session_id, [])

@@ -499,6 +499,12 @@ def get_distinct_ids_for_subquery(person: Person | None, team: Team) -> list[str
     last_ids_limit = MAX_LIMIT_DISTINCT_IDS - first_ids_limit
 
     if person is not None:
+        if hasattr(person, "_distinct_ids") and person._distinct_ids is not None:
+            ids = person._distinct_ids
+            if len(ids) <= MAX_LIMIT_DISTINCT_IDS:
+                return ids
+            return list(set(ids[:first_ids_limit] + ids[-last_ids_limit:]))
+
         first_ids = (
             PersonDistinctId.objects.db_manager(READ_DB_FOR_PERSONS)
             .filter(person=person, team=team)

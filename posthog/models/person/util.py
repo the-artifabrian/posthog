@@ -355,6 +355,154 @@ def get_persons_by_uuids(team: Team, uuids: list[str]) -> QuerySet | list[Person
     return Person.objects.db_manager(READ_DB_FOR_PERSONS).filter(team_id=team.pk, uuid__in=uuids)
 
 
+def _fetch_person_by_uuid_via_personhog(team_id: int, uuid: str) -> Optional[Person]:
+    from posthog.personhog_client.client import get_personhog_client
+    from posthog.personhog_client.converters import proto_person_to_model
+    from posthog.personhog_client.proto import GetDistinctIdsForPersonRequest, GetPersonByUuidRequest
+
+    client = get_personhog_client()
+    if client is None:
+        raise RuntimeError("personhog client not configured")
+
+    resp = client.get_person_by_uuid(GetPersonByUuidRequest(team_id=team_id, uuid=uuid))
+
+    if not resp.person or not resp.person.id:
+        return None
+
+    if resp.person.team_id != team_id:
+        PERSONHOG_TEAM_MISMATCH_TOTAL.labels(operation="get_person_by_uuid", client_name=get_client_name()).inc()
+        logger.warning("personhog_team_mismatch", operation="get_person_by_uuid", team_id=team_id)
+        return None
+
+    did_resp = client.get_distinct_ids_for_person(
+        GetDistinctIdsForPersonRequest(team_id=team_id, person_id=resp.person.id)
+    )
+
+    return proto_person_to_model(resp.person, distinct_ids=[d.distinct_id for d in did_resp.distinct_ids])
+
+
+def get_person_by_uuid(team_id: int, uuid: str) -> Optional[Person]:
+    from posthog.personhog_client.gate import use_personhog
+
+    if use_personhog():
+        try:
+            result = _fetch_person_by_uuid_via_personhog(team_id, uuid)
+            PERSONHOG_ROUTING_TOTAL.labels(
+                operation="get_person_by_uuid", source="personhog", client_name=get_client_name()
+            ).inc()
+            return result
+        except Exception:
+            PERSONHOG_ROUTING_ERRORS_TOTAL.labels(
+                operation="get_person_by_uuid",
+                source="personhog",
+                error_type="grpc_error",
+                client_name=get_client_name(),
+            ).inc()
+            logger.warning("personhog_get_person_by_uuid_failure", team_id=team_id, exc_info=True)
+
+    PERSONHOG_ROUTING_TOTAL.labels(
+        operation="get_person_by_uuid", source="django_orm", client_name=get_client_name()
+    ).inc()
+    return Person.objects.db_manager(READ_DB_FOR_PERSONS).filter(team_id=team_id, uuid=uuid).first()
+
+
+def _fetch_person_by_distinct_id_via_personhog(team_id: int, distinct_id: str) -> Optional[Person]:
+    from posthog.personhog_client.client import get_personhog_client
+    from posthog.personhog_client.converters import proto_person_to_model
+    from posthog.personhog_client.proto import GetDistinctIdsForPersonRequest, GetPersonByDistinctIdRequest
+
+    client = get_personhog_client()
+    if client is None:
+        raise RuntimeError("personhog client not configured")
+
+    resp = client.get_person_by_distinct_id(GetPersonByDistinctIdRequest(team_id=team_id, distinct_id=distinct_id))
+
+    if not resp.person or not resp.person.id:
+        return None
+
+    if resp.person.team_id != team_id:
+        PERSONHOG_TEAM_MISMATCH_TOTAL.labels(operation="get_person_by_distinct_id", client_name=get_client_name()).inc()
+        logger.warning("personhog_team_mismatch", operation="get_person_by_distinct_id", team_id=team_id)
+        return None
+
+    did_resp = client.get_distinct_ids_for_person(
+        GetDistinctIdsForPersonRequest(team_id=team_id, person_id=resp.person.id)
+    )
+
+    return proto_person_to_model(resp.person, distinct_ids=[d.distinct_id for d in did_resp.distinct_ids])
+
+
+def get_person_by_distinct_id(team_id: int, distinct_id: str) -> Optional[Person]:
+    from posthog.personhog_client.gate import use_personhog
+
+    if use_personhog():
+        try:
+            result = _fetch_person_by_distinct_id_via_personhog(team_id, distinct_id)
+            PERSONHOG_ROUTING_TOTAL.labels(
+                operation="get_person_by_distinct_id", source="personhog", client_name=get_client_name()
+            ).inc()
+            return result
+        except Exception:
+            PERSONHOG_ROUTING_ERRORS_TOTAL.labels(
+                operation="get_person_by_distinct_id",
+                source="personhog",
+                error_type="grpc_error",
+                client_name=get_client_name(),
+            ).inc()
+            logger.warning("personhog_get_person_by_distinct_id_failure", team_id=team_id, exc_info=True)
+
+    PERSONHOG_ROUTING_TOTAL.labels(
+        operation="get_person_by_distinct_id", source="django_orm", client_name=get_client_name()
+    ).inc()
+    return (
+        Person.objects.db_manager(READ_DB_FOR_PERSONS)
+        .filter(team_id=team_id, persondistinctid__distinct_id=distinct_id)
+        .first()
+    )
+
+
+def _validate_uuids_via_personhog(team_id: int, uuids: list[str]) -> list[str]:
+    from posthog.personhog_client.client import get_personhog_client
+    from posthog.personhog_client.proto import GetPersonsByUuidsRequest
+
+    client = get_personhog_client()
+    if client is None:
+        raise RuntimeError("personhog client not configured")
+
+    resp = client.get_persons_by_uuids(GetPersonsByUuidsRequest(team_id=team_id, uuids=uuids))
+    return [p.uuid for p in resp.persons if p.team_id == team_id]
+
+
+def validate_person_uuids_exist(team_id: int, uuids: list[str]) -> list[str]:
+    from posthog.personhog_client.gate import use_personhog
+
+    if use_personhog():
+        try:
+            result = _validate_uuids_via_personhog(team_id, uuids)
+            PERSONHOG_ROUTING_TOTAL.labels(
+                operation="validate_person_uuids_exist", source="personhog", client_name=get_client_name()
+            ).inc()
+            return result
+        except Exception:
+            PERSONHOG_ROUTING_ERRORS_TOTAL.labels(
+                operation="validate_person_uuids_exist",
+                source="personhog",
+                error_type="grpc_error",
+                client_name=get_client_name(),
+            ).inc()
+            logger.warning("personhog_validate_person_uuids_exist_failure", team_id=team_id, exc_info=True)
+
+    PERSONHOG_ROUTING_TOTAL.labels(
+        operation="validate_person_uuids_exist", source="django_orm", client_name=get_client_name()
+    ).inc()
+    return [
+        str(u)
+        for u in Person.objects.db_manager(READ_DB_FOR_PERSONS)
+        .filter(team_id=team_id, uuid__in=uuids)
+        .values_list("uuid", flat=True)
+    ]
+
+
 def delete_person(person: Person, sync: bool = False) -> None:
     # This is racy https://github.com/PostHog/posthog/issues/11590
     distinct_ids_to_version = _get_distinct_ids_with_version(person)

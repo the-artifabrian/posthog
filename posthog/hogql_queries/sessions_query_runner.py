@@ -1,5 +1,6 @@
 from datetime import timedelta
 from typing import Optional
+from uuid import UUID
 
 from django.utils.timezone import now
 
@@ -14,6 +15,7 @@ from posthog.hogql_queries.insights.paginators import HogQLHasMorePaginator
 from posthog.hogql_queries.query_runner import AnalyticsQueryRunner
 from posthog.models import Action, Person
 from posthog.models.person.person import READ_DB_FOR_PERSONS, get_distinct_ids_for_subquery
+from posthog.models.person.util import get_person_by_uuid
 from posthog.utils import relative_date_parse
 
 # Allow-listed fields returned when you select "*" from sessions
@@ -93,9 +95,14 @@ class SessionsQueryRunner(AnalyticsQueryRunner[SessionsQueryResponse]):
                         )
                 if self.query.personId:
                     with self.timings.measure("person_id"):
-                        person: Optional[Person] = get_pk_or_uuid(
-                            Person.objects.db_manager(READ_DB_FOR_PERSONS).filter(team=self.team), self.query.personId
-                        ).first()
+                        try:
+                            UUID(self.query.personId)
+                            person: Optional[Person] = get_person_by_uuid(self.team.pk, self.query.personId)
+                        except ValueError:
+                            person = get_pk_or_uuid(
+                                Person.objects.db_manager(READ_DB_FOR_PERSONS).filter(team=self.team),
+                                self.query.personId,
+                            ).first()
                         where_exprs.append(
                             ast.CompareOperation(
                                 left=ast.Call(name="cityHash64", args=[ast.Field(chain=["distinct_id"])]),
