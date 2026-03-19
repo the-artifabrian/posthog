@@ -24,15 +24,9 @@ class CreateExportAssetsInputs:
 
 @dataclasses.dataclass
 class CreateExportAssetsResult:
-    subscription_id: int
     exported_asset_ids: list[int]
     total_insight_count: int
-    target_type: str
-    target_value: str
     team_id: int = 0
-    is_new_subscription_target: bool = False
-    previous_value: typing.Optional[str] = None
-    invite_message: typing.Optional[str] = None
 
 
 @dataclasses.dataclass

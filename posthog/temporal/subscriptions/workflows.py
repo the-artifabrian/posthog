@@ -29,6 +29,25 @@ from posthog.temporal.subscriptions.types import (
 )
 
 
+def _extract_error_details(exc: BaseException) -> tuple[str | None, float | None]:
+    """Extract failure_type and duration_ms from a Temporal activity exception chain.
+
+    export_asset_activity wraps failures in ApplicationError with the asset's
+    failure_type as the first detail and duration_ms as the second, so we can
+    classify SLO outcomes and measure latency without a database round-trip.
+    """
+    cause = getattr(exc, "cause", None)
+    if cause is not None:
+        try:
+            details = cause.details
+            failure_type = details[0] if len(details) >= 1 and isinstance(details[0], str) else None
+            duration_ms = details[1] if len(details) >= 2 and isinstance(details[1], (int, float)) else None
+            return failure_type, duration_ms
+        except Exception:
+            pass
+    return None, None
+
+
 @temporalio.workflow.defn(name="schedule-all-subscriptions")
 class ScheduleAllSubscriptionsWorkflow(PostHogWorkflow):
     """Workflow to schedule all subscriptions that are due for delivery."""
@@ -134,7 +153,15 @@ class ProcessSubscriptionWorkflow(PostHogWorkflow):
         successful_asset_ids = []
         for (asset_id, _), result in zip(export_tasks, export_results):
             if isinstance(result, BaseException):
-                outcome_assets.append(ExportOutcomeAsset(exported_asset_id=asset_id, success=False))
+                failure_type, duration_ms = _extract_error_details(result)
+                outcome_assets.append(
+                    ExportOutcomeAsset(
+                        exported_asset_id=asset_id,
+                        success=False,
+                        failure_type=failure_type,
+                        duration_ms=duration_ms,
+                    )
+                )
             else:
                 outcome_assets.append(
                     ExportOutcomeAsset(
@@ -142,6 +169,7 @@ class ProcessSubscriptionWorkflow(PostHogWorkflow):
                         success=result.success,
                         failure_type=result.failure_type,
                         insight_id=result.insight_id,
+                        duration_ms=result.duration_ms,
                     )
                 )
                 if result.success:
@@ -168,9 +196,10 @@ class ProcessSubscriptionWorkflow(PostHogWorkflow):
         # Phase 4: Deliver — send with whatever assets we have
         delivery_asset_ids = successful_asset_ids if successful_asset_ids else prepare_result.exported_asset_ids
 
-        # API passes previous_value="" for new subscriptions and the actual
-        # old value for updates — treat both None and "" as "not a target change"
-        is_new = bool(inputs.previous_value)
+        # previous_value=None  → scheduled delivery (not a target change)
+        # previous_value=""    → new subscription (target changed from nothing)
+        # previous_value="old" → update (target changed from old value)
+        is_new = inputs.previous_value is not None
 
         await temporalio.workflow.execute_activity(
             deliver_subscription,

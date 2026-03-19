@@ -20,6 +20,8 @@ class SloOutcome(StrEnum):
 
 class ResultQuality(StrEnum):
     OK = "ok"
+    EMPTY = "empty"
+    DEGRADED = "degraded"
     ERROR = "error"
     STALE = "stale"
 

@@ -69,11 +69,8 @@ async def create_export_assets(inputs: CreateExportAssetsInputs) -> CreateExport
     # and emitting unpaired slo_operation_started events
     if inputs.previous_value is not None and subscription.target_value == inputs.previous_value:
         return CreateExportAssetsResult(
-            subscription_id=subscription.id,
             exported_asset_ids=[],
             total_insight_count=0,
-            target_type=subscription.target_type,
-            target_value=subscription.target_value,
             team_id=team.id,
         )
 
@@ -136,11 +133,8 @@ async def create_export_assets(inputs: CreateExportAssetsInputs) -> CreateExport
         )
 
     return CreateExportAssetsResult(
-        subscription_id=subscription.id,
         exported_asset_ids=[a.id for a in assets],
         total_insight_count=len(insights),
-        target_type=subscription.target_type,
-        target_value=subscription.target_value,
         team_id=team.id,
     )
 

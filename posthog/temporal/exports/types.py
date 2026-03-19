@@ -16,6 +16,7 @@ class ExportAssetResult:
     success: bool
     failure_type: Optional[str] = None
     insight_id: Optional[int] = None
+    duration_ms: Optional[float] = None
 
 
 @dataclasses.dataclass
