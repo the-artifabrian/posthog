@@ -1,4 +1,4 @@
-import { EventSchemaEnforcement, PipelineEvent, Team } from '../../types'
+import { EventSchemaEnforcement, PipelineEvent, PropertyValidationRules, Team } from '../../types'
 import { EventSchemaEnforcementManager } from '../../utils/event-schema-enforcement-manager'
 import { drop, ok } from '../pipelines/results'
 import { ProcessingStep } from '../pipelines/steps'
@@ -14,6 +14,9 @@ function canCoerceToType(value: unknown, propertyType: string): boolean {
     }
 
     switch (propertyType) {
+        case 'Any':
+            return true
+
         case 'String':
             // Everything can be coerced to string
             return true
@@ -55,9 +58,10 @@ function canCoerceToType(value: unknown, propertyType: string): boolean {
 
 export interface SchemaValidationError {
     propertyName: string
-    reason: 'missing_required' | 'type_mismatch'
+    reason: 'missing_required' | 'type_mismatch' | 'value_validation_failed'
     expectedTypes?: string[]
     actualValue?: unknown
+    validationDetail?: string
 }
 
 export interface SchemaValidationResult {
@@ -65,9 +69,97 @@ export interface SchemaValidationResult {
     errors: SchemaValidationError[]
 }
 
+function checkStringEnum(value: unknown, allowedValues: string[]): boolean {
+    return allowedValues.includes(String(value))
+}
+
+function checkStringNotEnum(value: unknown, deniedValues: string[]): boolean {
+    return !deniedValues.includes(String(value))
+}
+
+function checkNumericRange(value: unknown, rules: PropertyValidationRules): boolean {
+    let numValue: number
+    if (typeof value === 'number') {
+        numValue = value
+    } else if (typeof value === 'string') {
+        numValue = Number(value.trim())
+    } else {
+        return false
+    }
+    if (!Number.isFinite(numValue)) {
+        return false
+    }
+
+    if (rules.minimum !== undefined && numValue < rules.minimum) {
+        return false
+    }
+    if (rules.exclusiveMinimum !== undefined && numValue <= rules.exclusiveMinimum) {
+        return false
+    }
+    if (rules.maximum !== undefined && numValue > rules.maximum) {
+        return false
+    }
+    if (rules.exclusiveMaximum !== undefined && numValue >= rules.exclusiveMaximum) {
+        return false
+    }
+    return true
+}
+
+/**
+ * Validates a property value against validation rules from multiple property groups.
+ * Uses OR semantics: the value passes if it satisfies ANY of the rule sets.
+ */
+function validatePropertyValue(value: unknown, ruleSets: PropertyValidationRules[]): string | null {
+    for (const rules of ruleSets) {
+        if (rules.enum) {
+            if (checkStringEnum(value, rules.enum)) {
+                return null
+            }
+        } else if (rules.not?.enum) {
+            if (checkStringNotEnum(value, rules.not.enum)) {
+                return null
+            }
+        } else if (
+            rules.minimum !== undefined ||
+            rules.exclusiveMinimum !== undefined ||
+            rules.maximum !== undefined ||
+            rules.exclusiveMaximum !== undefined
+        ) {
+            if (checkNumericRange(value, rules)) {
+                return null
+            }
+        } else {
+            return null
+        }
+    }
+
+    // Build a detail message from the first rule set
+    const firstRules = ruleSets[0]
+    if (firstRules.enum) {
+        return `value must be one of: ${firstRules.enum.join(', ')}`
+    } else if (firstRules.not?.enum) {
+        return `value must not be one of: ${firstRules.not.enum.join(', ')}`
+    } else {
+        const bounds: string[] = []
+        if (firstRules.minimum !== undefined) {
+            bounds.push(`>= ${firstRules.minimum}`)
+        }
+        if (firstRules.exclusiveMinimum !== undefined) {
+            bounds.push(`> ${firstRules.exclusiveMinimum}`)
+        }
+        if (firstRules.maximum !== undefined) {
+            bounds.push(`<= ${firstRules.maximum}`)
+        }
+        if (firstRules.exclusiveMaximum !== undefined) {
+            bounds.push(`< ${firstRules.exclusiveMaximum}`)
+        }
+        return `value must be ${bounds.join(' and ')}`
+    }
+}
+
 /**
  * Validates an event's properties against an enforced schema.
- * Only required properties are validated - optional properties are not included in the schema.
+ * Required properties must be present; optional properties are only type-checked when present.
  */
 export function validateEventAgainstSchema(
     eventProperties: Record<string, unknown> | undefined,
@@ -75,24 +167,40 @@ export function validateEventAgainstSchema(
 ): SchemaValidationResult {
     const errors: SchemaValidationError[] = []
 
-    for (const [propertyName, propertyTypes] of schema.required_properties) {
+    for (const [propertyName, config] of schema.properties) {
         const value = eventProperties?.[propertyName]
 
         if (value === null || value === undefined) {
+            if (config.is_required) {
+                errors.push({
+                    propertyName,
+                    reason: 'missing_required',
+                })
+            }
+            continue
+        }
+
+        if (!config.types.some((type) => canCoerceToType(value, type))) {
             errors.push({
                 propertyName,
-                reason: 'missing_required',
+                reason: 'type_mismatch',
+                expectedTypes: config.types,
+                actualValue: value,
             })
             continue
         }
 
-        if (!propertyTypes.some((type) => canCoerceToType(value, type))) {
-            errors.push({
-                propertyName,
-                reason: 'type_mismatch',
-                expectedTypes: propertyTypes,
-                actualValue: value,
-            })
+        const validationRuleSets = schema.property_validation_rules.get(propertyName)
+        if (validationRuleSets && validationRuleSets.length > 0) {
+            const detail = validatePropertyValue(value, validationRuleSets)
+            if (detail !== null) {
+                errors.push({
+                    propertyName,
+                    reason: 'value_validation_failed',
+                    actualValue: value,
+                    validationDetail: detail,
+                })
+            }
         }
     }
 
@@ -102,9 +210,43 @@ export function validateEventAgainstSchema(
     }
 }
 
+function buildSchemaValidationWarning(
+    event: PipelineEvent,
+    validationResult: SchemaValidationResult
+): {
+    type: string
+    details: Record<string, unknown>
+} {
+    return {
+        type: 'schema_validation_failed',
+        details: {
+            eventUuid: event.uuid,
+            eventName: event.event,
+            distinctId: event.distinct_id,
+            errors: validationResult.errors.map((err) => ({
+                property: err.propertyName,
+                reason: err.reason,
+                expectedTypes: err.expectedTypes,
+                actualValue:
+                    err.actualValue !== undefined
+                        ? typeof err.actualValue === 'object'
+                            ? JSON.stringify(err.actualValue)
+                            : String(err.actualValue)
+                        : undefined,
+                validationDetail: err.validationDetail,
+            })),
+        },
+    }
+}
+
 /**
  * Creates a processing step that validates events against enforced schemas.
- * Events that fail validation are dropped and an ingestion warning is emitted.
+ *
+ * Behavior depends on the enforcement mode:
+ * - `reject`: events that fail validation are dropped with an ingestion warning
+ * - `enforce`: events are always passed through, but stamped with +version (pass) or -version (fail)
+ *
+ * The kill switch `team.schema_validation_disabled` bypasses all validation.
  *
  * @param schemaManager - Manager for fetching enforced schemas (uses caching internally)
  */
@@ -113,6 +255,10 @@ export function createValidateEventSchemaStep<T extends { event: PipelineEvent; 
 ): ProcessingStep<T, T> {
     return async function validateEventSchemaStep(input) {
         const { event, team } = input
+
+        if (team.schema_validation_disabled) {
+            return ok(input)
+        }
 
         const enforcedSchemas = await schemaManager.getSchemas(team.id)
         if (enforcedSchemas.size === 0) {
@@ -126,34 +272,23 @@ export function createValidateEventSchemaStep<T extends { event: PipelineEvent; 
 
         const validationResult = validateEventAgainstSchema(event.properties, schema)
 
-        if (!validationResult.valid) {
-            return drop(
-                'schema_validation_failed',
-                [],
-                [
-                    {
-                        type: 'schema_validation_failed',
-                        details: {
-                            eventUuid: event.uuid,
-                            eventName: event.event,
-                            distinctId: event.distinct_id,
-                            errors: validationResult.errors.map((err) => ({
-                                property: err.propertyName,
-                                reason: err.reason,
-                                expectedTypes: err.expectedTypes,
-                                actualValue:
-                                    err.actualValue !== undefined
-                                        ? typeof err.actualValue === 'object'
-                                            ? JSON.stringify(err.actualValue)
-                                            : String(err.actualValue)
-                                        : undefined,
-                            })),
-                        },
-                    },
-                ]
-            )
+        if (schema.enforcement_mode === 'enforce') {
+            // Enforce mode: stamp version and always pass through
+            if (validationResult.valid) {
+                event.validated_schema_version = schema.schema_version
+            } else {
+                event.validated_schema_version = -schema.schema_version
+            }
+            const warnings = validationResult.valid ? [] : [buildSchemaValidationWarning(event, validationResult)]
+            return ok(input, [], warnings)
         }
 
+        // Reject mode: drop on failure, stamp on success
+        if (!validationResult.valid) {
+            return drop('schema_validation_failed', [], [buildSchemaValidationWarning(event, validationResult)])
+        }
+
+        event.validated_schema_version = schema.schema_version
         return ok(input)
     }
 }

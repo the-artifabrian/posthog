@@ -127,6 +127,7 @@ class EventsTable(Table):
             join_table=SessionsTableV1(),
             join_function=join_events_table_to_sessions_table,
         ),
+        "validated_schema_version": IntegerDatabaseField(name="validated_schema_version", nullable=False),
         "elements_chain_href": StringDatabaseField(name="elements_chain_href", nullable=False),
         "elements_chain_texts": StringArrayDatabaseField(name="elements_chain_texts", nullable=False),
         "elements_chain_ids": StringArrayDatabaseField(name="elements_chain_ids", nullable=False),

@@ -1,6 +1,6 @@
 import { PluginEvent } from '~/plugin-scaffold'
 
-import { EventHeaders, ISOTimestamp, PreIngestionEvent, Team } from '../../types'
+import { EventHeaders, ISOTimestamp, PipelineEvent, PreIngestionEvent, Team } from '../../types'
 import { sanitizeEventName } from '../../utils/db/utils'
 import { invalidTimestampCounter } from '../../worker/ingestion/event-pipeline/metrics'
 import { parseEventTimestamp } from '../../worker/ingestion/timestamps'
@@ -42,6 +42,10 @@ export function createPrepareEventStep<TInput extends PrepareEventStepInput>(): 
 
         const timestamp = parseEventTimestamp(normalizedEvent, invalidTimestampCallback)
 
+        // The normalizedEvent may carry validated_schema_version set by the schema validation step.
+        // PluginEvent doesn't declare it, but PipelineEvent does - cast to access it safely.
+        const schemaVersion = (normalizedEvent as PipelineEvent).validated_schema_version
+
         const preparedEvent: PreIngestionEvent = {
             eventUuid: normalizedEvent.uuid,
             event: sanitizedEventName,
@@ -50,6 +54,7 @@ export function createPrepareEventStep<TInput extends PrepareEventStepInput>(): 
             timestamp: timestamp.toISO() as ISOTimestamp,
             teamId: input.team.id,
             projectId: input.team.project_id,
+            ...(schemaVersion !== undefined ? { validated_schema_version: schemaVersion } : {}),
         }
 
         const historicalMigration = input.headers.historical_migration ?? false

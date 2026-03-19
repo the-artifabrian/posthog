@@ -120,6 +120,7 @@ export class TeamManager {
                 t.timezone,
                 t.logs_settings,
                 t.extra_settings,
+                t.schema_validation_disabled,
                 extract('epoch' from t.drop_events_older_than) as drop_events_older_than_seconds,
                 o.available_product_features
             FROM posthog_team t

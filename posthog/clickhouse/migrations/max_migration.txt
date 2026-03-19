@@ -1,1 +1,1 @@
-0219_drop_group_keys_from_person
+0220_add_validated_schema_version_to_events

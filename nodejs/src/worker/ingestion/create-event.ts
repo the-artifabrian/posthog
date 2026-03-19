@@ -107,6 +107,9 @@ export function createEvent(
         person_mode: personMode,
         // Only include historical_migration when true to avoid bloating messages
         ...(historicalMigration ? { historical_migration: true } : {}),
+        ...(preIngestionEvent.validated_schema_version !== undefined
+            ? { validated_schema_version: preIngestionEvent.validated_schema_version }
+            : {}),
     }
 
     return processedEvent

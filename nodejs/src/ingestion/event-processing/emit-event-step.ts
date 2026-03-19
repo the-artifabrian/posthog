@@ -105,6 +105,9 @@ export function serializeEvent(event: ProcessedEvent): RawKafkaEvent {
         person_created_at: castTimestampOrNow(event.person_created_at, TimestampFormat.ClickHouseSecondPrecision),
         person_mode: event.person_mode,
         ...(event.historical_migration ? { historical_migration: true } : {}),
+        ...(event.validated_schema_version !== undefined
+            ? { validated_schema_version: event.validated_schema_version }
+            : {}),
     }
 }
 
