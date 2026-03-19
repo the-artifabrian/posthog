@@ -1,11 +1,6 @@
 from posthog.temporal.exports.activities import emit_export_outcome_events, export_asset_activity
 from posthog.temporal.exports.retry_policy import EXPORT_RETRY_POLICY
-from posthog.temporal.exports.types import (
-    EmitExportOutcomeInput,
-    ExportAssetActivityInputs,
-    ExportAssetResult,
-    ExportOutcome,
-)
+from posthog.temporal.exports.types import EmitExportOutcomeInput, ExportAssetActivityInputs, ExportAssetResult
 
 __all__ = [
     "emit_export_outcome_events",
@@ -14,7 +9,6 @@ __all__ = [
     "EmitExportOutcomeInput",
     "ExportAssetActivityInputs",
     "ExportAssetResult",
-    "ExportOutcome",
 ]
 
 WORKFLOWS: list = []

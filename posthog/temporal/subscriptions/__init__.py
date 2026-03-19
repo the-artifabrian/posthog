@@ -1,18 +1,20 @@
 from posthog.temporal.exports.activities import emit_export_outcome_events, export_asset_activity
-from posthog.temporal.subscriptions.subscription_scheduling_workflow import (
-    DeliverSubscriptionWorkflow,
-    HandleSubscriptionValueChangeWorkflow,
-    ScheduleAllSubscriptionsWorkflow,
+from posthog.temporal.subscriptions.activities import (
+    create_export_assets,
     deliver_subscription,
     fetch_due_subscriptions_activity,
-    prepare_subscription_assets,
+)
+from posthog.temporal.subscriptions.workflows import (
+    HandleSubscriptionValueChangeWorkflow,
+    ProcessSubscriptionWorkflow,
+    ScheduleAllSubscriptionsWorkflow,
 )
 
-WORKFLOWS = [ScheduleAllSubscriptionsWorkflow, HandleSubscriptionValueChangeWorkflow, DeliverSubscriptionWorkflow]
+WORKFLOWS = [ScheduleAllSubscriptionsWorkflow, HandleSubscriptionValueChangeWorkflow, ProcessSubscriptionWorkflow]
 
 ACTIVITIES = [
     fetch_due_subscriptions_activity,
-    prepare_subscription_assets,
+    create_export_assets,
     export_asset_activity,
     deliver_subscription,
     emit_export_outcome_events,

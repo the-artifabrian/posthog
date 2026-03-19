@@ -1,13 +1,5 @@
 import dataclasses
-from enum import StrEnum
 from typing import Optional
-
-
-class ExportOutcome(StrEnum):
-    SUCCESS = "success"
-    SYSTEM_ERROR = "system_error"
-    TIMEOUT = "timeout"
-    USER_ERROR = "user_error"
 
 
 @dataclasses.dataclass

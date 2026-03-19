@@ -47,7 +47,6 @@ async def test_export_asset_activity_success(
     mock_exporter: MagicMock,
     team,
 ):
-    """Activity should call export_asset_direct and return success when asset has content."""
     asset = await sync_to_async(ExportedAsset.objects.create)(
         team=team,
         export_format="image/png",
@@ -86,7 +85,6 @@ async def test_export_asset_activity_propagates_user_errors(
     mock_exporter: MagicMock,
     team,
 ):
-    """Activity should re-raise exceptions so Temporal can classify them for retry decisions."""
     from posthog.tasks.exports.failure_handler import ExcelColumnLimitExceeded
 
     asset = await sync_to_async(ExportedAsset.objects.create)(

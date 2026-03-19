@@ -1,22 +1,15 @@
-import os
-from uuid import NAMESPACE_DNS, uuid5
-
 import structlog
-import posthoganalytics
 import temporalio.activity
 
 from posthog.event_usage import EventSource
 from posthog.models.exported_asset import ExportedAsset
+from posthog.slo.events import emit_slo_completed
+from posthog.slo.types import ResultQuality, SloArea, SloCompletedProperties, SloOperation, SloOutcome
 from posthog.sync import database_sync_to_async
 from posthog.tasks import exporter
 from posthog.tasks.exports.failure_handler import FAILURE_TYPE_TIMEOUT_GENERATION, FAILURE_TYPE_USER
 from posthog.temporal.common.heartbeat import Heartbeater
-from posthog.temporal.exports.types import (
-    EmitExportOutcomeInput,
-    ExportAssetActivityInputs,
-    ExportAssetResult,
-    ExportOutcome,
-)
+from posthog.temporal.exports.types import EmitExportOutcomeInput, ExportAssetActivityInputs, ExportAssetResult
 
 logger = structlog.get_logger(__name__)
 
@@ -69,24 +62,22 @@ async def export_asset_activity(inputs: ExportAssetActivityInputs) -> ExportAsse
 async def emit_export_outcome_events(inputs: EmitExportOutcomeInput) -> None:
     """Emit slo_operation_completed events for each export asset. Workflow-level activity for guaranteed delivery."""
     for asset_data in inputs.assets:
-        outcome = ExportOutcome.SUCCESS if asset_data.success else _classify_outcome(asset_data.failure_type)
-        result_quality = "ok" if asset_data.success else "error"
-        posthoganalytics.capture(
-            distinct_id=str(inputs.team_id),
-            event="slo_operation_completed",
-            uuid=str(uuid5(NAMESPACE_DNS, f"slo-operation-completed-{asset_data.exported_asset_id}")),
-            properties={
-                # Canonical SLO properties
-                "operation": "export",
-                "operation_type": inputs.export_format,
-                "operation_id": str(asset_data.exported_asset_id),
-                "resource_id": str(asset_data.insight_id) if asset_data.insight_id else None,
-                "team_id": inputs.team_id,
-                "outcome": outcome,
-                "result_quality": result_quality,
-                "duration_ms": asset_data.duration_ms,
-                "deploy_sha": os.environ.get("COMMIT_SHA"),
-                # Export-specific properties
+        outcome = SloOutcome.SUCCESS if asset_data.success else _classify_outcome(asset_data.failure_type)
+        result_quality = ResultQuality.OK if asset_data.success else ResultQuality.ERROR
+        emit_slo_completed(
+            properties=SloCompletedProperties(
+                operation=SloOperation.EXPORT,
+                operation_type=inputs.export_format,
+                operation_id=str(asset_data.exported_asset_id),
+                area=SloArea.ANALYTIC_PLATFORM,
+                team_id=inputs.team_id,
+                outcome=outcome,
+                result_quality=result_quality,
+                resource_id=str(asset_data.insight_id) if asset_data.insight_id else None,
+                duration_ms=asset_data.duration_ms,
+            ),
+            idempotency_key=str(asset_data.exported_asset_id),
+            extra_properties={
                 "exported_asset_id": asset_data.exported_asset_id,
                 "source": inputs.source,
                 "total_attempts": asset_data.attempts,
@@ -101,9 +92,9 @@ async def emit_export_outcome_events(inputs: EmitExportOutcomeInput) -> None:
         )
 
 
-def _classify_outcome(failure_type: str | None) -> str:
+def _classify_outcome(failure_type: str | None) -> SloOutcome:
     if failure_type == FAILURE_TYPE_USER:
-        return ExportOutcome.USER_ERROR
+        return SloOutcome.USER_ERROR
     if failure_type == FAILURE_TYPE_TIMEOUT_GENERATION:
-        return ExportOutcome.TIMEOUT
-    return ExportOutcome.SYSTEM_ERROR
+        return SloOutcome.TIMEOUT
+    return SloOutcome.SYSTEM_ERROR
