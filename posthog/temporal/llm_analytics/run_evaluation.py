@@ -203,18 +203,32 @@ async def increment_trial_eval_count_activity(team_id: int) -> int | None:
     """Increment trial eval counter after successful execution with PostHog key.
 
     Returns the usage percentage threshold that was just crossed (50, 75, or
-    100), or None if no threshold was crossed. Uses exact equality so that
-    only the increment that crosses the boundary triggers a notification.
-    Concurrent increments may overshoot, but MessagingRecord deduplication
-    prevents duplicate emails regardless.
+    100), or None if no threshold was crossed. The increment and read are
+    performed atomically via UPDATE ... RETURNING to avoid race conditions
+    where concurrent increments could both see the same threshold.
     """
-    from django.db.models import F
+    from django.db import connection
 
     def _increment() -> int | None:
-        EvaluationConfig.objects.filter(team_id=team_id).update(trial_evals_used=F("trial_evals_used") + 1)
-        config = EvaluationConfig.objects.get(team_id=team_id)
+        table = EvaluationConfig._meta.db_table
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"""
+                UPDATE {table}
+                SET trial_evals_used = trial_evals_used + 1
+                WHERE team_id = %s
+                RETURNING trial_evals_used, trial_eval_limit
+                """,
+                [team_id],
+            )
+            row = cursor.fetchone()
+            if row is None:
+                logger.warning("No EvaluationConfig found for team during trial increment", team_id=team_id)
+                return None
+            trial_evals_used, trial_eval_limit = row
+
         for pct in TRIAL_NOTIFICATION_THRESHOLDS:
-            if config.trial_evals_used == round(config.trial_eval_limit * pct / 100):
+            if trial_evals_used == round(trial_eval_limit * pct / 100):
                 return pct
         return None
 
@@ -266,7 +280,7 @@ async def send_trial_usage_email_activity(inputs: SendTrialUsageEmailInputs) -> 
             return
 
         settings_url = f"/project/{team.pk}/settings/environment-llm-analytics#llm-analytics-byok"
-        campaign_key = f"llm_analytics_trial_{inputs.threshold_pct}pct_{team.organization_id}"
+        campaign_key = f"llm_analytics_trial_{inputs.threshold_pct}pct_{team.id}"
         is_exhausted = inputs.threshold_pct >= 100
 
         if is_exhausted:

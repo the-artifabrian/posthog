@@ -1048,7 +1048,7 @@ class TestSendTrialUsageEmailActivity:
     @pytest.mark.asyncio
     @pytest.mark.django_db(transaction=True)
     @pytest.mark.parametrize("threshold_pct", [50, 75, 100], ids=["50pct", "75pct", "100pct"])
-    async def test_campaign_key_includes_threshold_and_org(self, setup_data, threshold_pct):
+    async def test_campaign_key_includes_threshold_and_team(self, setup_data, threshold_pct):
         team = setup_data["team"]
         await sync_to_async(EvaluationConfig.objects.get_or_create)(team_id=team.id)
 
@@ -1064,5 +1064,4 @@ class TestSendTrialUsageEmailActivity:
             )
 
             call_kwargs = mock_email_class.call_args[1]
-            org_id = str(setup_data["organization"].id)
-            assert call_kwargs["campaign_key"] == f"llm_analytics_trial_{threshold_pct}pct_{org_id}"
+            assert call_kwargs["campaign_key"] == f"llm_analytics_trial_{threshold_pct}pct_{team.id}"
