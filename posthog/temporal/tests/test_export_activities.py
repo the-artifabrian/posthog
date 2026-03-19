@@ -10,6 +10,7 @@ from django.conf import settings
 import temporalio.workflow
 from asgiref.sync import sync_to_async
 from temporalio.client import WorkflowFailureError
+from temporalio.exceptions import ActivityError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
@@ -122,7 +123,7 @@ async def test_export_asset_activity_propagates_user_errors(
         wf_error = exc_info.value
         assert isinstance(wf_error, WorkflowFailureError)
         activity_error = wf_error.cause
-        assert activity_error is not None
-        app_error = activity_error.cause  # type: ignore[union-attr]
+        assert isinstance(activity_error, ActivityError)
+        app_error = activity_error.cause
         assert app_error is not None
         assert "ExcelColumnLimitExceeded" in str(app_error) or "18,278 columns" in str(app_error)
