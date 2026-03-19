@@ -29,12 +29,12 @@ from posthog.temporal.subscriptions.types import (
 )
 
 
-def _extract_error_details(exc: BaseException) -> tuple[str | None, float | None]:
-    """Extract failure_type and duration_ms from a Temporal activity exception chain.
+def _extract_error_details(exc: BaseException) -> tuple[str | None, float | None, str, int]:
+    """Extract failure metadata from a Temporal activity exception chain.
 
-    export_asset_activity wraps failures in ApplicationError with the asset's
-    failure_type as the first detail and duration_ms as the second, so we can
-    classify SLO outcomes and measure latency without a database round-trip.
+    export_asset_activity wraps failures in ApplicationError with details:
+    [failure_type, duration_ms, export_format, attempt]. This lets us classify
+    SLO outcomes without a database round-trip.
     """
     cause = getattr(exc, "cause", None)
     if cause is not None:
@@ -42,10 +42,54 @@ def _extract_error_details(exc: BaseException) -> tuple[str | None, float | None
             details = cause.details
             failure_type = details[0] if len(details) >= 1 and isinstance(details[0], str) else None
             duration_ms = details[1] if len(details) >= 2 and isinstance(details[1], (int, float)) else None
-            return failure_type, duration_ms
+            export_format = details[2] if len(details) >= 3 and isinstance(details[2], str) else ""
+            attempts = details[3] if len(details) >= 4 and isinstance(details[3], int) else 1
+            return failure_type, duration_ms, export_format, attempts
         except Exception:
             pass
-    return None, None
+    return None, None, "", 1
+
+
+def _build_outcome_assets(
+    asset_ids: list[int],
+    export_results: list[ExportAssetResult | BaseException],
+) -> tuple[list[ExportOutcomeAsset], list[int]]:
+    """Classify export results into outcome assets and collect successful asset IDs.
+
+    BaseException objects from asyncio.gather(return_exceptions=True) aren't
+    serializable across the Temporal activity boundary, so this classification
+    must happen in the workflow, not in an activity.
+    """
+    outcome_assets: list[ExportOutcomeAsset] = []
+    successful_asset_ids: list[int] = []
+    for asset_id, result in zip(asset_ids, export_results):
+        if isinstance(result, BaseException):
+            failure_type, duration_ms, export_format, attempts = _extract_error_details(result)
+            outcome_assets.append(
+                ExportOutcomeAsset(
+                    exported_asset_id=asset_id,
+                    success=False,
+                    failure_type=failure_type,
+                    duration_ms=duration_ms,
+                    export_format=export_format,
+                    attempts=attempts,
+                )
+            )
+        else:
+            outcome_assets.append(
+                ExportOutcomeAsset(
+                    exported_asset_id=result.exported_asset_id,
+                    success=result.success,
+                    failure_type=result.failure_type,
+                    insight_id=result.insight_id,
+                    duration_ms=result.duration_ms,
+                    export_format=result.export_format,
+                    attempts=result.attempts,
+                )
+            )
+            if result.success:
+                successful_asset_ids.append(result.exported_asset_id)
+    return outcome_assets, successful_asset_ids
 
 
 @temporalio.workflow.defn(name="schedule-all-subscriptions")
@@ -76,15 +120,15 @@ class ScheduleAllSubscriptionsWorkflow(PostHogWorkflow):
         )
 
         # Fan-out child workflows — one per subscription, fully isolated.
-        # Include the parent workflow run ID in the child ID to avoid collisions
-        # when a previous schedule run's child is still executing.
-        run_id = temporalio.workflow.info().run_id
+        # Idempotent ID (no run_id suffix) prevents duplicate deliveries when
+        # schedule runs overlap: if the previous run's child is still executing,
+        # Temporal rejects the duplicate start and we log it below.
         tasks = []
         for sub_id in subscription_ids:
             task = temporalio.workflow.execute_child_workflow(
                 ProcessSubscriptionWorkflow.run,
                 ProcessSubscriptionWorkflowInputs(subscription_id=sub_id),
-                id=f"process-subscription-{sub_id}-{run_id}",
+                id=f"process-subscription-{sub_id}",
                 parent_close_policy=temporalio.workflow.ParentClosePolicy.ABANDON,
                 execution_timeout=dt.timedelta(hours=2),
             )
@@ -93,7 +137,13 @@ class ScheduleAllSubscriptionsWorkflow(PostHogWorkflow):
         if tasks:
             # return_exceptions=True: individual subscription failures are isolated —
             # one failing subscription should not prevent others from being delivered.
-            await asyncio.gather(*tasks, return_exceptions=True)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for sub_id, result in zip(subscription_ids, results):
+                if isinstance(result, BaseException):
+                    temporalio.workflow.logger.warning(
+                        "process_subscription.child_workflow_error",
+                        extra={"subscription_id": sub_id, "error": str(result)},
+                    )
 
 
 @temporalio.workflow.defn(name="process-subscription")
@@ -149,40 +199,16 @@ class ProcessSubscriptionWorkflow(PostHogWorkflow):
         )
 
         # Build outcome data for SLO events
-        outcome_assets = []
-        successful_asset_ids = []
-        for (asset_id, _), result in zip(export_tasks, export_results):
-            if isinstance(result, BaseException):
-                failure_type, duration_ms = _extract_error_details(result)
-                outcome_assets.append(
-                    ExportOutcomeAsset(
-                        exported_asset_id=asset_id,
-                        success=False,
-                        failure_type=failure_type,
-                        duration_ms=duration_ms,
-                    )
-                )
-            else:
-                outcome_assets.append(
-                    ExportOutcomeAsset(
-                        exported_asset_id=result.exported_asset_id,
-                        success=result.success,
-                        failure_type=result.failure_type,
-                        insight_id=result.insight_id,
-                        duration_ms=result.duration_ms,
-                    )
-                )
-                if result.success:
-                    successful_asset_ids.append(result.exported_asset_id)
+        asset_ids = [aid for aid, _ in export_tasks]
+        outcome_assets, successful_asset_ids = _build_outcome_assets(asset_ids, export_results)
 
         # Phase 3: Emit SLO outcome events — close the export SLO before delivery
-        # so the started→completed duration measures only the export, not delivery
+        # so the started->completed duration measures only the export, not delivery
         await temporalio.workflow.execute_activity(
             emit_export_outcome_events,
             EmitExportOutcomeInput(
                 team_id=prepare_result.team_id,
                 source="subscription",
-                export_format="image/png",
                 assets=outcome_assets,
             ),
             start_to_close_timeout=dt.timedelta(minutes=2),
@@ -196,9 +222,7 @@ class ProcessSubscriptionWorkflow(PostHogWorkflow):
         # Phase 4: Deliver — send with whatever assets we have
         delivery_asset_ids = successful_asset_ids if successful_asset_ids else prepare_result.exported_asset_ids
 
-        # previous_value=None  → scheduled delivery (not a target change)
-        # previous_value=""    → new subscription (target changed from nothing)
-        # previous_value="old" → update (target changed from old value)
+        # is_new is true when previous_value is set (target change), false for scheduled delivery
         is_new = inputs.previous_value is not None
 
         await temporalio.workflow.execute_activity(

@@ -12,7 +12,7 @@ from django.conf import settings
 import pytest_asyncio
 from asgiref.sync import sync_to_async
 from temporalio.client import Client
-from temporalio.testing import WorkflowEnvironment
+from temporalio.testing import ActivityEnvironment, WorkflowEnvironment
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
 from posthog.models.dashboard import Dashboard
@@ -20,6 +20,7 @@ from posthog.models.dashboard_tile import DashboardTile
 from posthog.models.exported_asset import ExportedAsset
 from posthog.models.insight import Insight
 from posthog.models.instance_setting import set_instance_setting
+from posthog.tasks.exports.failure_handler import ExcelColumnLimitExceeded
 from posthog.temporal.exports.activities import emit_export_outcome_events, export_asset_activity
 from posthog.temporal.subscriptions.activities import (
     create_export_assets,
@@ -28,6 +29,7 @@ from posthog.temporal.subscriptions.activities import (
 )
 from posthog.temporal.subscriptions.types import (
     CreateExportAssetsInputs,
+    DeliverSubscriptionInputs,
     ProcessSubscriptionWorkflowInputs,
     ScheduleAllSubscriptionsWorkflowInputs,
 )
@@ -345,8 +347,6 @@ async def test_create_export_assets_creates_exported_assets(
     insight = await sync_to_async(Insight.objects.create)(team=team, short_id="prep01", name="Prep Test")
     subscription = await sync_to_async(create_subscription)(team=team, insight=insight, created_by=user)
 
-    from temporalio.testing import ActivityEnvironment
-
     env = ActivityEnvironment()
     result = await env.run(
         create_export_assets,
@@ -382,8 +382,6 @@ async def test_create_export_assets_dashboard_with_multiple_insights(
 
     subscription = await sync_to_async(create_subscription)(team=team, dashboard=dashboard, created_by=user)
 
-    from temporalio.testing import ActivityEnvironment
-
     env = ActivityEnvironment()
     result = await env.run(
         create_export_assets,
@@ -405,8 +403,6 @@ async def test_deliver_subscription_sends_email(
     team,
     user,
 ):
-    from posthog.temporal.subscriptions.types import DeliverSubscriptionInputs
-
     insight = await sync_to_async(Insight.objects.create)(team=team, short_id="del01", name="Deliver Test")
     asset = await sync_to_async(ExportedAsset.objects.create)(
         team=team,
@@ -416,8 +412,6 @@ async def test_deliver_subscription_sends_email(
     )
     # Factory default target_value is "test1@posthog.com,test2@posthog.com" (2 recipients)
     subscription = await sync_to_async(create_subscription)(team=team, insight=insight, created_by=user)
-
-    from temporalio.testing import ActivityEnvironment
 
     env = ActivityEnvironment()
     await env.run(
@@ -509,8 +503,6 @@ async def test_new_subscription_sends_invite_email(
     team,
     user,
 ):
-    """New subscription (previous_value='') should deliver with invite_message
-    and NOT update next_delivery_date."""
     insight = await sync_to_async(Insight.objects.create)(team=team, short_id="inv01", name="Invite Test")
     subscription = await sync_to_async(create_subscription)(
         team=team,
@@ -577,8 +569,6 @@ async def test_scheduled_delivery_updates_next_delivery_date(
     team,
     user,
 ):
-    """Scheduled delivery (previous_value=None) should update next_delivery_date
-    and NOT pass invite_message."""
     insight = await sync_to_async(Insight.objects.create)(team=team, short_id="sched1", name="Sched Test")
     subscription = await sync_to_async(create_subscription)(team=team, insight=insight, created_by=user)
     original_next_delivery = subscription.next_delivery_date
@@ -636,10 +626,6 @@ async def test_export_user_error_classified_correctly_in_slo_events(
     team,
     user,
 ):
-    """When an export fails with a user error (e.g. ExcelColumnLimitExceeded),
-    the SLO completed event should have outcome=user_error, not system_error."""
-    from posthog.tasks.exports.failure_handler import ExcelColumnLimitExceeded
-
     insight = await sync_to_async(Insight.objects.create)(team=team, short_id="slo01", name="SLO Test")
     subscription = await sync_to_async(create_subscription)(team=team, insight=insight, created_by=user)
 
@@ -695,10 +681,6 @@ async def test_partial_export_failure_delivers_successful_assets(
     team,
     user,
 ):
-    """When some exports fail and others succeed, the workflow should deliver
-    only the successful assets and emit correct mixed SLO outcomes."""
-    from posthog.tasks.exports.failure_handler import ExcelColumnLimitExceeded
-
     dashboard = await sync_to_async(Dashboard.objects.create)(team=team, name="partial fail", created_by=user)
     insights = []
     for i in range(3):

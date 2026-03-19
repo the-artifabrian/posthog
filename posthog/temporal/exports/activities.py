@@ -19,7 +19,6 @@ logger = structlog.get_logger(__name__)
 
 @temporalio.activity.defn
 async def export_asset_activity(inputs: ExportAssetActivityInputs) -> ExportAssetResult:
-    """Export a single ExportedAsset. Retried by Temporal on transient failures."""
     async with Heartbeater():
         asset = await database_sync_to_async(
             lambda: ExportedAsset.objects_including_ttl_deleted.select_related(
@@ -51,12 +50,15 @@ async def export_asset_activity(inputs: ExportAssetActivityInputs) -> ExportAsse
                 team_id=asset.team_id,
                 failure_type=asset.failure_type,
             )
-            # Wrap in ApplicationError to propagate failure_type and duration_ms
-            # as details while preserving the exception class name for retry policy matching
+            # Wrap in ApplicationError to propagate failure metadata as details
+            # while preserving the exception class name for retry policy matching.
+            # Detail order: [failure_type, duration_ms, export_format, attempt]
             raise ApplicationError(
                 str(e),
                 asset.failure_type,
                 duration_ms,
+                asset.export_format,
+                temporalio.activity.info().attempt,
                 type=type(e).__name__,
             ) from e
 
@@ -69,19 +71,20 @@ async def export_asset_activity(inputs: ExportAssetActivityInputs) -> ExportAsse
             failure_type=asset.failure_type,
             insight_id=asset.insight_id,
             duration_ms=duration_ms,
+            export_format=asset.export_format,
+            attempts=temporalio.activity.info().attempt,
         )
 
 
 @temporalio.activity.defn
 async def emit_export_outcome_events(inputs: EmitExportOutcomeInput) -> None:
-    """Emit slo_operation_completed events for each export asset. Workflow-level activity for guaranteed delivery."""
     for asset_data in inputs.assets:
         outcome = SloOutcome.SUCCESS if asset_data.success else _classify_outcome(asset_data.failure_type)
         result_quality = _classify_result_quality(asset_data.success, asset_data.failure_type)
         emit_slo_completed(
             properties=SloCompletedProperties(
                 operation=SloOperation.EXPORT,
-                operation_type=inputs.export_format,
+                operation_type=asset_data.export_format,
                 operation_id=str(asset_data.exported_asset_id),
                 area=SloArea.ANALYTIC_PLATFORM,
                 team_id=inputs.team_id,

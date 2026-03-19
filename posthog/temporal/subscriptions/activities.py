@@ -56,7 +56,6 @@ async def fetch_due_subscriptions_activity(inputs: FetchDueSubscriptionsActivity
 
 @temporalio.activity.defn
 async def create_export_assets(inputs: CreateExportAssetsInputs) -> CreateExportAssetsResult:
-    """Load subscription, determine insights, bulk-create ExportedAssets, emit slo_operation_started."""
     subscription = await database_sync_to_async(
         Subscription.objects.select_related("created_by", "insight", "dashboard", "team").get,
         thread_sensitive=False,
