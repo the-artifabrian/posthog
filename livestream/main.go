@@ -118,6 +118,17 @@ func main() {
 		}
 	}
 
+	if config.Kafka.NotificationEnabled && statsRedis != nil {
+		notifConsumer, err := events.NewNotificationKafkaConsumer(config.Kafka, statsRedis.Client())
+		if err != nil {
+			log.Printf("Failed to create notification Kafka consumer: %v", err)
+		} else {
+			defer notifConsumer.Close()
+			go notifConsumer.Consume(ctx)
+			log.Printf("Notification Kafka consumer enabled (topic: %s)", config.Kafka.NotificationTopic)
+		}
+	}
+
 	go func() {
 		ticker := time.NewTicker(7127 * time.Millisecond)
 		defer ticker.Stop()
