@@ -31,11 +31,17 @@ export class PostHogToolbarController {
 
     /** Whether the toolbar button is currently visible. Returns false if toolbar is not loaded. */
     get isVisible(): boolean {
+        if (!_loaded) {
+            return false
+        }
         return toolbarConfigLogic.findMounted()?.values.buttonVisible ?? false
     }
 
     /** Whether the toolbar has a valid authentication session. Returns false if toolbar is not loaded. */
     get isAuthenticated(): boolean {
+        if (!_loaded) {
+            return false
+        }
         return toolbarConfigLogic.findMounted()?.values.isAuthenticated ?? false
     }
 
@@ -63,15 +69,21 @@ export class PostHogToolbarController {
             return
         }
 
-        _reactRoot?.unmount()
-        _container?.parentNode?.removeChild(_container)
+        // Capture refs before clearing — clearToolbarRefs() nulls them, but we
+        // clear first so that isLoaded becomes false immediately, preventing
+        // external callers from interacting with a half-torn-down toolbar.
+        const reactRoot = _reactRoot
+        const container = _container
+        clearToolbarRefs()
+
+        reactRoot?.unmount()
+        container?.parentNode?.removeChild(container)
 
         // Remove the shadow DOM host element if it still exists
         document.getElementById(TOOLBAR_ID)?.remove()
 
         resetContext()
-        clearToolbarRefs()
     }
 }
 
-export const posthogToolbar = new PostHogToolbarController()
+export const posthogToolbarController = new PostHogToolbarController()

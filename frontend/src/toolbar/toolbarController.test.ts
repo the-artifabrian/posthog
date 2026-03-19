@@ -2,7 +2,12 @@ import type { Root } from 'react-dom/client'
 
 import { initKeaTests } from '~/test/init'
 import { toolbarConfigLogic } from '~/toolbar/toolbarConfigLogic'
-import { clearToolbarRefs, posthogToolbar, PostHogToolbarController, setToolbarRefs } from '~/toolbar/toolbarController'
+import {
+    clearToolbarRefs,
+    posthogToolbarController,
+    PostHogToolbarController,
+    setToolbarRefs,
+} from '~/toolbar/toolbarController'
 
 global.fetch = jest.fn(() =>
     Promise.resolve({
@@ -33,25 +38,25 @@ describe('PostHogToolbarController', () => {
         }
     })
 
-    it('posthogToolbar is an instance of PostHogToolbarController', () => {
-        expect(posthogToolbar).toBeInstanceOf(PostHogToolbarController)
+    it('posthogToolbarController is an instance of PostHogToolbarController', () => {
+        expect(posthogToolbarController).toBeInstanceOf(PostHogToolbarController)
     })
 
     describe('isLoaded getter', () => {
         it('returns false before setToolbarRefs', () => {
-            expect(posthogToolbar.isLoaded).toBe(false)
+            expect(posthogToolbarController.isLoaded).toBe(false)
         })
 
         it('returns true after setToolbarRefs', () => {
             setToolbarRefs(mockRoot, mockContainer)
-            expect(posthogToolbar.isLoaded).toBe(true)
+            expect(posthogToolbarController.isLoaded).toBe(true)
         })
 
         it('returns false after destroy()', () => {
             setToolbarRefs(mockRoot, mockContainer)
-            expect(posthogToolbar.isLoaded).toBe(true)
-            posthogToolbar.destroy()
-            expect(posthogToolbar.isLoaded).toBe(false)
+            expect(posthogToolbarController.isLoaded).toBe(true)
+            posthogToolbarController.destroy()
+            expect(posthogToolbarController.isLoaded).toBe(false)
         })
     })
 
@@ -64,7 +69,7 @@ describe('PostHogToolbarController', () => {
             logic.actions.hideButton()
             expect(logic.values.buttonVisible).toBe(false)
 
-            posthogToolbar.show()
+            posthogToolbarController.show()
             expect(logic.values.buttonVisible).toBe(true)
         })
 
@@ -75,25 +80,25 @@ describe('PostHogToolbarController', () => {
 
             expect(logic.values.buttonVisible).toBe(true)
 
-            posthogToolbar.hide()
+            posthogToolbarController.hide()
             expect(logic.values.buttonVisible).toBe(false)
 
-            posthogToolbar.show()
+            posthogToolbarController.show()
             expect(logic.values.buttonVisible).toBe(true)
         })
 
         it('show() does not throw when toolbar is not loaded', () => {
-            expect(() => posthogToolbar.show()).not.toThrow()
+            expect(() => posthogToolbarController.show()).not.toThrow()
         })
 
         it('hide() does not throw when toolbar is not loaded', () => {
-            expect(() => posthogToolbar.hide()).not.toThrow()
+            expect(() => posthogToolbarController.hide()).not.toThrow()
         })
     })
 
     describe('isVisible getter', () => {
         it('returns false when toolbar is not loaded', () => {
-            expect(posthogToolbar.isVisible).toBe(false)
+            expect(posthogToolbarController.isVisible).toBe(false)
         })
 
         it('returns buttonVisible value when toolbar is loaded', () => {
@@ -101,13 +106,13 @@ describe('PostHogToolbarController', () => {
             logic.mount()
             setToolbarRefs(mockRoot, mockContainer)
 
-            expect(posthogToolbar.isVisible).toBe(true)
+            expect(posthogToolbarController.isVisible).toBe(true)
 
             logic.actions.hideButton()
-            expect(posthogToolbar.isVisible).toBe(false)
+            expect(posthogToolbarController.isVisible).toBe(false)
 
             logic.actions.showButton()
-            expect(posthogToolbar.isVisible).toBe(true)
+            expect(posthogToolbarController.isVisible).toBe(true)
         })
     })
 
@@ -118,7 +123,7 @@ describe('PostHogToolbarController', () => {
             setToolbarRefs(mockRoot, mockContainer)
 
             const authenticateSpy = jest.spyOn(logic.actions, 'authenticate')
-            posthogToolbar.authenticate()
+            posthogToolbarController.authenticate()
             expect(authenticateSpy).toHaveBeenCalled()
             authenticateSpy.mockRestore()
         })
@@ -136,22 +141,22 @@ describe('PostHogToolbarController', () => {
             expect(logic.values.isAuthenticated).toBe(true)
 
             const authenticateSpy = jest.spyOn(logic.actions, 'authenticate')
-            posthogToolbar.authenticate()
+            posthogToolbarController.authenticate()
             expect(authenticateSpy).not.toHaveBeenCalled()
             authenticateSpy.mockRestore()
         })
 
         it('does not throw when toolbar is not loaded', () => {
-            expect(() => posthogToolbar.authenticate()).not.toThrow()
+            expect(() => posthogToolbarController.authenticate()).not.toThrow()
         })
     })
 
     describe('isAuthenticated getter', () => {
         it('returns false when toolbar is not loaded', () => {
-            expect(posthogToolbar.isAuthenticated).toBe(false)
+            expect(posthogToolbarController.isAuthenticated).toBe(false)
         })
 
-        it('returns true when toolbarConfigLogic has accessToken', () => {
+        it('returns false when toolbarConfigLogic is mounted but setToolbarRefs has not been called', () => {
             const logic = toolbarConfigLogic.build({
                 apiURL: 'http://localhost',
                 accessToken: 'pha_test_token',
@@ -160,35 +165,50 @@ describe('PostHogToolbarController', () => {
             })
             logic.mount()
 
-            expect(posthogToolbar.isAuthenticated).toBe(true)
+            // isAuthenticated is gated on _loaded, so it returns false even though
+            // toolbarConfigLogic reports authenticated
+            expect(posthogToolbarController.isAuthenticated).toBe(false)
+        })
+
+        it('returns true when toolbar is loaded and toolbarConfigLogic has accessToken', () => {
+            const logic = toolbarConfigLogic.build({
+                apiURL: 'http://localhost',
+                accessToken: 'pha_test_token',
+                refreshToken: 'phr_refresh',
+                clientId: 'client-id',
+            })
+            logic.mount()
+            setToolbarRefs(mockRoot, mockContainer)
+
+            expect(posthogToolbarController.isAuthenticated).toBe(true)
         })
     })
 
     describe('destroy()', () => {
         it('calls mockRoot.unmount()', () => {
             setToolbarRefs(mockRoot, mockContainer)
-            posthogToolbar.destroy()
+            posthogToolbarController.destroy()
             expect((mockRoot as any).unmount).toHaveBeenCalled()
         })
 
         it('removes container from document.body', () => {
             setToolbarRefs(mockRoot, mockContainer)
             expect(mockContainer.parentNode).toBe(document.body)
-            posthogToolbar.destroy()
+            posthogToolbarController.destroy()
             expect(mockContainer.parentNode).toBeNull()
         })
 
         it('sets isLoaded to false after destroy', () => {
             setToolbarRefs(mockRoot, mockContainer)
-            expect(posthogToolbar.isLoaded).toBe(true)
-            posthogToolbar.destroy()
-            expect(posthogToolbar.isLoaded).toBe(false)
+            expect(posthogToolbarController.isLoaded).toBe(true)
+            posthogToolbarController.destroy()
+            expect(posthogToolbarController.isLoaded).toBe(false)
         })
 
         it('is idempotent -- calling destroy() twice does not throw', () => {
             setToolbarRefs(mockRoot, mockContainer)
-            posthogToolbar.destroy()
-            expect(() => posthogToolbar.destroy()).not.toThrow()
+            posthogToolbarController.destroy()
+            expect(() => posthogToolbarController.destroy()).not.toThrow()
             expect((mockRoot as any).unmount).toHaveBeenCalledTimes(1)
         })
     })
