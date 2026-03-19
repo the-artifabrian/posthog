@@ -105,6 +105,7 @@ class EventDefinitionSerializer(TaggedItemSerializerMixin, serializers.ModelSeri
             "last_updated_at",
             "tags",
             "enforcement_mode",
+            "schema_version",
             # Action fields
             "is_action",
             "action_id",
@@ -113,6 +114,7 @@ class EventDefinitionSerializer(TaggedItemSerializerMixin, serializers.ModelSeri
             "created_by",
             "post_to_slack",
         )
+        read_only_fields = ("schema_version",)
 
     def validate_name(self, value):
         # For creation, check if event definition with this name already exists
@@ -131,11 +133,11 @@ class EventDefinitionSerializer(TaggedItemSerializerMixin, serializers.ModelSeri
             if validated_data["hidden"] and validated_data["verified"]:
                 raise serializers.ValidationError("An event cannot be both hidden and verified")
 
-        if validated_data.get("enforcement_mode") == "reject":
+        if validated_data.get("enforcement_mode") in ("reject", "enforce"):
             request = self.context.get("request")
             if not request or not request.user:
                 raise serializers.ValidationError(
-                    'Setting schema enforcement mode to "reject" requires an authenticated request'
+                    'Setting schema enforcement mode to "reject" or "enforce" requires an authenticated request'
                 )
             user = request.user
             org = self.context["get_organization"]()
@@ -149,7 +151,7 @@ class EventDefinitionSerializer(TaggedItemSerializerMixin, serializers.ModelSeri
             )
             if not flag_enabled:
                 raise serializers.ValidationError(
-                    'Setting schema enforcement mode to "reject" requires the schema-enforcement-reject feature flag'
+                    'Setting schema enforcement mode to "reject" or "enforce" requires the schema-enforcement-reject feature flag'
                 )
 
         return validated_data

@@ -1,3 +1,5 @@
+from django.db.models import F
+
 from rest_framework import mixins, serializers, viewsets
 
 from posthog.api.routing import TeamAndOrgViewSetMixin
@@ -39,6 +41,7 @@ class EventSchemaSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         instance = EventSchema.objects.create(**validated_data)
+        EventDefinition.objects.filter(pk=instance.event_definition_id).update(schema_version=F("schema_version") + 1)
         return EventSchema.objects.prefetch_related("property_group__properties").get(pk=instance.pk)
 
 
@@ -74,6 +77,11 @@ class EventSchemaViewSet(
                 raise NotFound()
         else:
             return queryset
+
+    def perform_destroy(self, instance):
+        event_definition_id = instance.event_definition_id
+        super().perform_destroy(instance)
+        EventDefinition.objects.filter(pk=event_definition_id).update(schema_version=F("schema_version") + 1)
 
     def safely_get_queryset(self, queryset):
         event_definition_id = self.request.query_params.get("event_definition")

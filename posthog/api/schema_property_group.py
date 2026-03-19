@@ -1,15 +1,23 @@
 import logging
 
 from django.db import IntegrityError, transaction
+from django.db.models import F
 
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import mixins, serializers, viewsets
 
 from posthog.api.routing import TeamAndOrgViewSetMixin
 from posthog.api.shared import UserBasicSerializer
-from posthog.models import SchemaPropertyGroup, SchemaPropertyGroupProperty
+from posthog.models import EventDefinition, SchemaPropertyGroup, SchemaPropertyGroupProperty
 
 MAX_PROPERTY_NAME_LENGTH = 200
+
+
+def _increment_linked_event_definition_versions(property_group: SchemaPropertyGroup) -> None:
+    """Increment schema_version on all EventDefinitions linked to this property group."""
+    event_definition_ids = property_group.event_schemas.values_list("event_definition_id", flat=True)
+    if event_definition_ids:
+        EventDefinition.objects.filter(pk__in=event_definition_ids).update(schema_version=F("schema_version") + 1)
 
 
 class SchemaPropertyGroupPropertySerializer(serializers.ModelSerializer):
@@ -123,6 +131,8 @@ class SchemaPropertyGroupSerializer(serializers.ModelSerializer):
                             # Create new property
                             SchemaPropertyGroupProperty.objects.create(property_group=instance, **property_data)
 
+                _increment_linked_event_definition_versions(instance)
+
             # Query fresh instance with properties to ensure all data is current
             return SchemaPropertyGroup.objects.prefetch_related("properties").get(pk=instance.pk)
         except IntegrityError as e:
@@ -164,6 +174,10 @@ class SchemaPropertyGroupViewSet(
     serializer_class = SchemaPropertyGroupSerializer
     queryset = SchemaPropertyGroup.objects.all()
     lookup_field = "id"
+
+    def perform_destroy(self, instance):
+        _increment_linked_event_definition_versions(instance)
+        super().perform_destroy(instance)
 
     def safely_get_queryset(self, queryset):
         return (

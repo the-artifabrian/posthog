@@ -42,6 +42,7 @@ class EnterpriseEventDefinitionSerializer(TaggedItemSerializerMixin, serializers
             "verified_by",
             "hidden",
             "enforcement_mode",
+            "schema_version",
             # Action fields
             "is_action",
             "action_id",
@@ -61,6 +62,7 @@ class EnterpriseEventDefinitionSerializer(TaggedItemSerializerMixin, serializers
             "last_updated_at",
             "verified_at",
             "verified_by",
+            "schema_version",
             # Action fields
             "is_action",
             "action_id",
@@ -100,11 +102,11 @@ class EnterpriseEventDefinitionSerializer(TaggedItemSerializerMixin, serializers
             if validated_data["hidden"] and validated_data["verified"]:
                 raise serializers.ValidationError("An event cannot be both hidden and verified")
 
-        if validated_data.get("enforcement_mode") == "reject":
+        if validated_data.get("enforcement_mode") in ("reject", "enforce"):
             request = self.context.get("request")
             if not request or not request.user:
                 raise serializers.ValidationError(
-                    'Setting schema enforcement mode to "reject" requires an authenticated request'
+                    'Setting schema enforcement mode to "reject" or "enforce" requires an authenticated request'
                 )
             user = request.user
             org = getattr(user, "organization", None)
@@ -118,7 +120,7 @@ class EnterpriseEventDefinitionSerializer(TaggedItemSerializerMixin, serializers
             )
             if not flag_enabled:
                 raise serializers.ValidationError(
-                    'Setting schema enforcement mode to "reject" requires the schema-enforcement-reject feature flag'
+                    'Setting schema enforcement mode to "reject" or "enforce" requires the schema-enforcement-reject feature flag'
                 )
 
         # Set verified metadata when verifying

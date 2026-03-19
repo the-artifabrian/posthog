@@ -600,6 +600,9 @@ class Team(UUIDTClassicModel):
     # DEPRECATED: use `revenue_analytics_config` property instead
     revenue_tracking_config = models.JSONField(null=True, blank=True)
 
+    # Schema validation kill switch - skip all schema validation in the ingestion pipeline
+    schema_validation_disabled = models.BooleanField(null=True, blank=True, default=False)
+
     # Duration for dropping events older than this threshold
     drop_events_older_than = models.DurationField(
         null=True,
