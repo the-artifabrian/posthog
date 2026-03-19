@@ -208,15 +208,25 @@ class GroupsViewSet(TeamAndOrgViewSetMixin, mixins.ListModelMixin, mixins.Create
         return self.serializer_classes.get(self.action, self.serializer_classes["default"])
 
     def safely_get_queryset(self, queryset):
+        group_type_index = self.request.GET.get("group_type_index")
+        if not group_type_index:
+            raise ValidationError({"group_type_index": ["This query parameter is required."]})
         return queryset.filter(
-            group_type_index=self.request.GET["group_type_index"],
+            group_type_index=group_type_index,
             group_key__icontains=self.request.GET.get("group_key", ""),
         )
 
     def safely_get_object(self, queryset):
+        group_type_index = self.request.GET.get("group_type_index")
+        if not group_type_index:
+            raise ValidationError({"group_type_index": ["This query parameter is required."]})
+        group_key = self.request.GET.get("group_key")
+        if not group_key:
+            raise ValidationError({"group_key": ["This query parameter is required."]})
+
         queryset = queryset.filter(
-            group_type_index=self.request.GET["group_type_index"],
-            group_key=self.request.GET.get("group_key", ""),
+            group_type_index=group_type_index,
+            group_key=group_key,
         )
 
         return get_object_or_404(queryset)
@@ -546,20 +556,16 @@ class GroupsViewSet(TeamAndOrgViewSetMixin, mixins.ListModelMixin, mixins.Create
     def delete_property(self, request: request.Request, **_kw) -> response.Response:
         try:
             group = self.get_object()
-            for key in ["$unset"]:
-                if request.data.get(key) is None:
-                    return response.Response(
-                        {
-                            "attr": key,
-                            "code": "This field is required.",
-                            "detail": "required",
-                            "type": "validation_error",
-                        },
-                        status=400,
-                    )
+            property_key = request.data.get("$unset")
+            if not isinstance(property_key, str):
+                raise ValidationError(
+                    {"$unset": ["This field is required and must be a string (the property name to delete)."]}
+                )
+            if property_key not in group.group_properties:
+                raise ValidationError({"$unset": [f"Property '{property_key}' does not exist on this group."]})
             group_type_mapping = self.get_group_type_mapping_or_404(cast(GroupTypeIndex, group.group_type_index))
-            original_value = group.group_properties[request.data["$unset"]]
-            del group.group_properties[request.data["$unset"]]
+            original_value = group.group_properties[property_key]
+            del group.group_properties[property_key]
             group.save()
 
             # Need to update ClickHouse too
@@ -579,7 +585,7 @@ class GroupsViewSet(TeamAndOrgViewSetMixin, mixins.ListModelMixin, mixins.Create
             properties = {
                 "$group_type": group_type_mapping.group_type,
                 "$group_key": group.group_key,
-                "$group_unset": [request.data["$unset"]],
+                "$group_unset": [property_key],
             }
 
             try:
@@ -597,7 +603,7 @@ class GroupsViewSet(TeamAndOrgViewSetMixin, mixins.ListModelMixin, mixins.Create
             except HTTPError as e:
                 return response.Response(
                     {
-                        "attr": key,
+                        "attr": "$unset",
                         "code": "Failed to submit group property deletion event.",
                         "detail": "capture_http_error",
                         "type": "capture_http_error",
@@ -607,7 +613,7 @@ class GroupsViewSet(TeamAndOrgViewSetMixin, mixins.ListModelMixin, mixins.Create
             except Exception:
                 return response.Response(
                     {
-                        "attr": key,
+                        "attr": "$unset",
                         "code": "Failed to submit group property deletion event.",
                         "detail": "capture_error",
                         "type": "capture_error",
@@ -624,7 +630,7 @@ class GroupsViewSet(TeamAndOrgViewSetMixin, mixins.ListModelMixin, mixins.Create
                 scope="Group",
                 activity="update_property",
                 detail=Detail(
-                    name=str(request.data["$unset"]),
+                    name=str(property_key),
                     changes=[Change(type="Group", action="deleted", before=original_value)],
                 ),
             )
