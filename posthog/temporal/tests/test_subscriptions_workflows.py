@@ -24,6 +24,7 @@ from posthog.temporal.exports.activities import emit_export_outcome_events, expo
 from posthog.temporal.subscriptions.activities import (
     create_export_assets,
     deliver_subscription,
+    emit_subscription_delivery_outcome,
     fetch_due_subscriptions_activity,
 )
 from posthog.temporal.subscriptions.types import (
@@ -60,6 +61,7 @@ async def subscriptions_worker(temporal_client: Client):
             export_asset_activity,
             deliver_subscription,
             emit_export_outcome_events,
+            emit_subscription_delivery_outcome,
         ],
         workflow_runner=UnsandboxedWorkflowRunner(),
     ):
@@ -129,6 +131,7 @@ async def test_subscription_delivery_scheduling(
                 export_asset_activity,
                 deliver_subscription,
                 emit_export_outcome_events,
+                emit_subscription_delivery_outcome,
             ],
             workflow_runner=UnsandboxedWorkflowRunner(),
             activity_executor=ThreadPoolExecutor(max_workers=50),
@@ -201,6 +204,7 @@ async def test_does_not_schedule_subscription_if_item_is_deleted(
                 export_asset_activity,
                 deliver_subscription,
                 emit_export_outcome_events,
+                emit_subscription_delivery_outcome,
             ],
             workflow_runner=UnsandboxedWorkflowRunner(),
             activity_executor=ThreadPoolExecutor(max_workers=50),
@@ -256,6 +260,7 @@ async def test_handle_subscription_value_change_email(
                 export_asset_activity,
                 deliver_subscription,
                 emit_export_outcome_events,
+                emit_subscription_delivery_outcome,
             ],
             workflow_runner=UnsandboxedWorkflowRunner(),
             activity_executor=ThreadPoolExecutor(max_workers=50),
@@ -318,6 +323,7 @@ async def test_deliver_subscription_report_slack(
                 export_asset_activity,
                 deliver_subscription,
                 emit_export_outcome_events,
+                emit_subscription_delivery_outcome,
             ],
             workflow_runner=UnsandboxedWorkflowRunner(),
             activity_executor=ThreadPoolExecutor(max_workers=50),
@@ -361,9 +367,13 @@ async def test_create_export_assets_creates_exported_assets(
     assert asset.insight_id == insight.id
     assert asset.export_format == "image/png"
 
-    mock_analytics.capture.assert_called_once()
-    call_kwargs = mock_analytics.capture.call_args
-    assert call_kwargs.kwargs["event"] == "slo_operation_started"
+    assert mock_analytics.capture.call_count == 2
+    started_calls = [
+        c for c in mock_analytics.capture.call_args_list if c.kwargs.get("event") == "slo_operation_started"
+    ]
+    assert len(started_calls) == 2
+    ops = {c.kwargs["properties"]["operation"] for c in started_calls}
+    assert ops == {"export", "subscription_delivery"}
 
 
 @patch("posthog.slo.events.posthoganalytics")
@@ -391,7 +401,8 @@ async def test_create_export_assets_dashboard_with_multiple_insights(
     )
 
     assert len(result.exported_asset_ids) == 3
-    assert mock_analytics.capture.call_count == 3
+    # 3 export started + 1 subscription_delivery started
+    assert mock_analytics.capture.call_count == 4
 
 
 @patch("ee.tasks.subscriptions.get_metric_meter")
@@ -466,6 +477,7 @@ async def test_deliver_subscription_workflow_end_to_end(
                 export_asset_activity,
                 deliver_subscription,
                 emit_export_outcome_events,
+                emit_subscription_delivery_outcome,
             ],
             workflow_runner=UnsandboxedWorkflowRunner(),
             activity_executor=ThreadPoolExecutor(max_workers=10),
@@ -481,17 +493,22 @@ async def test_deliver_subscription_workflow_end_to_end(
     # 2 recipients
     assert mock_send_email.call_count == 2
 
-    # Both started and completed events flow through posthog.slo.events
+    # Both export and subscription_delivery SLO events are emitted
     started_calls = [
         c for c in mock_slo_analytics.capture.call_args_list if c.kwargs.get("event") == "slo_operation_started"
     ]
-    assert len(started_calls) == 1
+    assert len(started_calls) == 2
+    started_ops = {c.kwargs["properties"]["operation"] for c in started_calls}
+    assert started_ops == {"export", "subscription_delivery"}
 
     completed_calls = [
         c for c in mock_slo_analytics.capture.call_args_list if c.kwargs.get("event") == "slo_operation_completed"
     ]
-    assert len(completed_calls) == 1
-    assert completed_calls[0].kwargs["properties"]["outcome"] == "success"
+    assert len(completed_calls) == 2
+    completed_by_op = {c.kwargs["properties"]["operation"]: c.kwargs["properties"] for c in completed_calls}
+    assert completed_by_op["export"]["outcome"] == "success"
+    assert completed_by_op["subscription_delivery"]["outcome"] == "success"
+    assert completed_by_op["subscription_delivery"]["result_quality"] == "ok"
 
 
 @patch("posthog.temporal.exports.activities.exporter")
@@ -536,6 +553,7 @@ async def test_new_subscription_sends_invite_email(
                 export_asset_activity,
                 deliver_subscription,
                 emit_export_outcome_events,
+                emit_subscription_delivery_outcome,
             ],
             workflow_runner=UnsandboxedWorkflowRunner(),
             activity_executor=ThreadPoolExecutor(max_workers=50),
@@ -599,6 +617,7 @@ async def test_scheduled_delivery_updates_next_delivery_date(
                 export_asset_activity,
                 deliver_subscription,
                 emit_export_outcome_events,
+                emit_subscription_delivery_outcome,
             ],
             workflow_runner=UnsandboxedWorkflowRunner(),
             activity_executor=ThreadPoolExecutor(max_workers=10),
@@ -661,6 +680,7 @@ async def test_export_user_error_classified_correctly_in_slo_events(
                 export_asset_activity,
                 deliver_subscription,
                 emit_export_outcome_events,
+                emit_subscription_delivery_outcome,
             ],
             workflow_runner=UnsandboxedWorkflowRunner(),
             activity_executor=ThreadPoolExecutor(max_workers=10),
@@ -676,8 +696,11 @@ async def test_export_user_error_classified_correctly_in_slo_events(
     completed_calls = [
         c for c in mock_slo_analytics.capture.call_args_list if c.kwargs.get("event") == "slo_operation_completed"
     ]
-    assert len(completed_calls) == 1
-    assert completed_calls[0].kwargs["properties"]["outcome"] == "user_error"
+    assert len(completed_calls) == 2
+    completed_by_op = {c.kwargs["properties"]["operation"]: c.kwargs["properties"] for c in completed_calls}
+    assert completed_by_op["export"]["outcome"] == "user_error"
+    assert completed_by_op["subscription_delivery"]["outcome"] == "success"
+    assert completed_by_op["subscription_delivery"]["result_quality"] == "empty"
 
 
 @patch("posthog.temporal.exports.activities.exporter")
@@ -732,6 +755,7 @@ async def test_partial_export_failure_delivers_successful_assets(
                 export_asset_activity,
                 deliver_subscription,
                 emit_export_outcome_events,
+                emit_subscription_delivery_outcome,
             ],
             workflow_runner=UnsandboxedWorkflowRunner(),
             activity_executor=ThreadPoolExecutor(max_workers=10),
@@ -752,10 +776,18 @@ async def test_partial_export_failure_delivers_successful_assets(
         for asset in delivered_assets:
             assert asset.insight_id != fail_insight_id
 
-    # SLO events: 2 success + 1 user_error
+    # SLO events: 3 export completed (2 success + 1 user_error) + 1 subscription_delivery completed
     completed_calls = [
         c for c in mock_slo_analytics.capture.call_args_list if c.kwargs.get("event") == "slo_operation_completed"
     ]
-    assert len(completed_calls) == 3
-    outcomes = sorted([c.kwargs["properties"]["outcome"] for c in completed_calls])
-    assert outcomes == ["success", "success", "user_error"]
+    assert len(completed_calls) == 4
+
+    export_completed = [c for c in completed_calls if c.kwargs["properties"]["operation"] == "export"]
+    assert len(export_completed) == 3
+    export_outcomes = sorted([c.kwargs["properties"]["outcome"] for c in export_completed])
+    assert export_outcomes == ["success", "success", "user_error"]
+
+    delivery_completed = [c for c in completed_calls if c.kwargs["properties"]["operation"] == "subscription_delivery"]
+    assert len(delivery_completed) == 1
+    assert delivery_completed[0].kwargs["properties"]["outcome"] == "success"
+    assert delivery_completed[0].kwargs["properties"]["result_quality"] == "degraded"

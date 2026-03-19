@@ -27,6 +27,8 @@ class CreateExportAssetsResult:
     exported_asset_ids: list[int]
     total_insight_count: int
     team_id: int = 0
+    target_type: str = ""
+    resource_id: typing.Optional[str] = None
 
 
 @dataclasses.dataclass
@@ -44,6 +46,19 @@ class ProcessSubscriptionWorkflowInputs:
     subscription_id: int
     previous_value: typing.Optional[str] = None
     invite_message: typing.Optional[str] = None
+
+
+@dataclasses.dataclass
+class EmitSubscriptionDeliveryOutcomeInput:
+    subscription_id: int
+    team_id: int
+    target_type: str
+    resource_id: typing.Optional[str] = None
+    outcome: str = "success"
+    result_quality: str = "ok"
+    duration_ms: typing.Optional[float] = None
+    assets_with_content: int = 0
+    total_assets: int = 0
 
 
 @dataclasses.dataclass

@@ -18,11 +18,13 @@ from posthog.temporal.exports.types import (
 from posthog.temporal.subscriptions.activities import (
     create_export_assets,
     deliver_subscription,
+    emit_subscription_delivery_outcome,
     fetch_due_subscriptions_activity,
 )
 from posthog.temporal.subscriptions.types import (
     CreateExportAssetsInputs,
     DeliverSubscriptionInputs,
+    EmitSubscriptionDeliveryOutcomeInput,
     FetchDueSubscriptionsActivityInputs,
     ProcessSubscriptionWorkflowInputs,
     ScheduleAllSubscriptionsWorkflowInputs,
@@ -46,6 +48,18 @@ def _extract_error_details(exc: BaseException) -> tuple[str | None, float | None
         except Exception:
             pass
     return None, None
+
+
+def _classify_delivery_quality(assets_with_content: int, total_assets: int) -> str:
+    """Classify result_quality for the subscription_delivery operation.
+
+    ok = all assets have content, degraded = some but not all, empty = none.
+    """
+    if total_assets == 0 or assets_with_content == 0:
+        return "empty"
+    if assets_with_content < total_assets:
+        return "degraded"
+    return "ok"
 
 
 @temporalio.workflow.defn(name="schedule-all-subscriptions")
@@ -107,6 +121,8 @@ class ProcessSubscriptionWorkflow(PostHogWorkflow):
 
     @temporalio.workflow.run
     async def run(self, inputs: ProcessSubscriptionWorkflowInputs) -> None:
+        start_time = temporalio.workflow.time()
+
         # Phase 1: Prepare — create ExportedAssets, emit slo_operation_started
         # previous_value is passed so the activity can skip asset creation if the
         # target value hasn't changed (avoids orphaned assets and unpaired SLO events)
@@ -201,20 +217,51 @@ class ProcessSubscriptionWorkflow(PostHogWorkflow):
         # previous_value="old" → update (target changed from old value)
         is_new = inputs.previous_value is not None
 
+        delivery_outcome = "success"
+        try:
+            await temporalio.workflow.execute_activity(
+                deliver_subscription,
+                DeliverSubscriptionInputs(
+                    subscription_id=inputs.subscription_id,
+                    exported_asset_ids=delivery_asset_ids,
+                    total_insight_count=prepare_result.total_insight_count,
+                    is_new_subscription_target=is_new,
+                    previous_value=inputs.previous_value,
+                    invite_message=inputs.invite_message,
+                ),
+                start_to_close_timeout=dt.timedelta(minutes=5),
+                retry_policy=temporalio.common.RetryPolicy(
+                    initial_interval=dt.timedelta(seconds=10),
+                    maximum_interval=dt.timedelta(minutes=2),
+                    maximum_attempts=3,
+                ),
+            )
+        except Exception:
+            delivery_outcome = "system_error"
+
+        # Phase 5: Emit subscription_delivery SLO completed
+        total_assets = len(outcome_assets)
+        assets_with_content = len(successful_asset_ids)
+        result_quality = _classify_delivery_quality(assets_with_content, total_assets)
+        duration_ms = (temporalio.workflow.time() - start_time) * 1000
+
         await temporalio.workflow.execute_activity(
-            deliver_subscription,
-            DeliverSubscriptionInputs(
+            emit_subscription_delivery_outcome,
+            EmitSubscriptionDeliveryOutcomeInput(
                 subscription_id=inputs.subscription_id,
-                exported_asset_ids=delivery_asset_ids,
-                total_insight_count=prepare_result.total_insight_count,
-                is_new_subscription_target=is_new,
-                previous_value=inputs.previous_value,
-                invite_message=inputs.invite_message,
+                team_id=prepare_result.team_id,
+                target_type=prepare_result.target_type,
+                resource_id=prepare_result.resource_id,
+                outcome=delivery_outcome,
+                result_quality=result_quality,
+                duration_ms=duration_ms,
+                assets_with_content=assets_with_content,
+                total_assets=total_assets,
             ),
-            start_to_close_timeout=dt.timedelta(minutes=5),
+            start_to_close_timeout=dt.timedelta(minutes=2),
             retry_policy=temporalio.common.RetryPolicy(
-                initial_interval=dt.timedelta(seconds=10),
-                maximum_interval=dt.timedelta(minutes=2),
+                initial_interval=dt.timedelta(seconds=5),
+                maximum_interval=dt.timedelta(minutes=1),
                 maximum_attempts=3,
             ),
         )

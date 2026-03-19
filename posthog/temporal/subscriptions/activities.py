@@ -7,13 +7,21 @@ from structlog import get_logger
 from posthog.exceptions_capture import capture_exception
 from posthog.models.exported_asset import ExportedAsset
 from posthog.models.subscription import Subscription
-from posthog.slo.events import emit_slo_started
-from posthog.slo.types import SloArea, SloOperation, SloStartedProperties
+from posthog.slo.events import emit_slo_completed, emit_slo_started
+from posthog.slo.types import (
+    ResultQuality,
+    SloArea,
+    SloCompletedProperties,
+    SloOperation,
+    SloOutcome,
+    SloStartedProperties,
+)
 from posthog.sync import database_sync_to_async
 from posthog.temporal.subscriptions.types import (
     CreateExportAssetsInputs,
     CreateExportAssetsResult,
     DeliverSubscriptionInputs,
+    EmitSubscriptionDeliveryOutcomeInput,
     FetchDueSubscriptionsActivityInputs,
 )
 
@@ -64,6 +72,9 @@ async def create_export_assets(inputs: CreateExportAssetsInputs) -> CreateExport
 
     team = subscription.team
     dashboard = subscription.dashboard
+    resource_id = (
+        str(dashboard.id) if dashboard else (str(subscription.insight_id) if subscription.insight_id else None)
+    )
 
     # Early exit if target value hasn't changed — avoids creating orphaned assets
     # and emitting unpaired slo_operation_started events
@@ -72,6 +83,8 @@ async def create_export_assets(inputs: CreateExportAssetsInputs) -> CreateExport
             exported_asset_ids=[],
             total_insight_count=0,
             team_id=team.id,
+            target_type=subscription.target_type,
+            resource_id=resource_id,
         )
 
     if dashboard:
@@ -132,10 +145,32 @@ async def create_export_assets(inputs: CreateExportAssetsInputs) -> CreateExport
             },
         )
 
+    # Emit subscription_delivery started — marks the beginning of the full delivery lifecycle
+    # Use Temporal workflow run ID for idempotency so each delivery attempt is unique
+    workflow_run_id = temporalio.activity.info().workflow_run_id
+    emit_slo_started(
+        properties=SloStartedProperties(
+            operation=SloOperation.SUBSCRIPTION_DELIVERY,
+            operation_type=subscription.target_type,
+            operation_id=str(subscription.id),
+            area=SloArea.ANALYTIC_PLATFORM,
+            team_id=team.id,
+            resource_id=resource_id,
+        ),
+        idempotency_key=f"subscription-delivery-{subscription.id}-{workflow_run_id}",
+        extra_properties={
+            "subscription_id": subscription.id,
+            "total_insight_count": len(insights),
+            "asset_count": len(assets),
+        },
+    )
+
     return CreateExportAssetsResult(
         exported_asset_ids=[a.id for a in assets],
         total_insight_count=len(insights),
         team_id=team.id,
+        target_type=subscription.target_type,
+        resource_id=resource_id,
     )
 
 
@@ -270,3 +305,34 @@ async def deliver_subscription(inputs: DeliverSubscriptionInputs) -> None:
     if not inputs.is_new_subscription_target:
         subscription.set_next_delivery_date(subscription.next_delivery_date)
         await database_sync_to_async(subscription.save, thread_sensitive=False)(update_fields=["next_delivery_date"])
+
+
+@temporalio.activity.defn
+async def emit_subscription_delivery_outcome(inputs: EmitSubscriptionDeliveryOutcomeInput) -> None:
+    """Emit slo_operation_completed for the subscription_delivery operation."""
+    workflow_run_id = temporalio.activity.info().workflow_run_id
+    emit_slo_completed(
+        properties=SloCompletedProperties(
+            operation=SloOperation.SUBSCRIPTION_DELIVERY,
+            operation_type=inputs.target_type,
+            operation_id=str(inputs.subscription_id),
+            area=SloArea.ANALYTIC_PLATFORM,
+            team_id=inputs.team_id,
+            outcome=SloOutcome(inputs.outcome),
+            result_quality=ResultQuality(inputs.result_quality),
+            resource_id=inputs.resource_id,
+            duration_ms=inputs.duration_ms,
+        ),
+        idempotency_key=f"subscription-delivery-{inputs.subscription_id}-{workflow_run_id}",
+        extra_properties={
+            "subscription_id": inputs.subscription_id,
+            "assets_with_content": inputs.assets_with_content,
+            "total_assets": inputs.total_assets,
+        },
+    )
+    LOGGER.info(
+        "emit_subscription_delivery_outcome.emitted",
+        subscription_id=inputs.subscription_id,
+        outcome=inputs.outcome,
+        result_quality=inputs.result_quality,
+    )

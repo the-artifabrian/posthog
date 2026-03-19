@@ -9,6 +9,7 @@ class SloArea(StrEnum):
 
 class SloOperation(StrEnum):
     EXPORT = "export"
+    SUBSCRIPTION_DELIVERY = "subscription_delivery"
 
 
 class SloOutcome(StrEnum):
